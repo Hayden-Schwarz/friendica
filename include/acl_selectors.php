@@ -1,14 +1,18 @@
 <?php
 
-require_once("include/contact_selectors.php");
-require_once("include/features.php");
-
 /**
- * 
+ * @file include/acl_selectors.php
  */
 
+require_once("include/contact_selectors.php");
+require_once("include/contact_widgets.php");
+require_once("include/DirSearch.php");
+require_once("include/features.php");
+require_once("mod/proxy.php");
+
+
 /**
- * @package acl_selectors 
+ * @package acl_selectors
  */
 function group_select($selname,$selclass,$preselected = false,$size = 4) {
 
@@ -18,7 +22,7 @@ function group_select($selname,$selclass,$preselected = false,$size = 4) {
 
 	$o .= "<select name=\"{$selname}[]\" id=\"$selclass\" class=\"$selclass\" multiple=\"multiple\" size=\"$size\" >\r\n";
 
-	$r = q("SELECT * FROM `group` WHERE `deleted` = 0 AND `uid` = %d ORDER BY `name` ASC",
+	$r = q("SELECT `id`, `name` FROM `group` WHERE NOT `deleted` AND `uid` = %d ORDER BY `name` ASC",
 		intval(local_user())
 	);
 
@@ -35,11 +39,12 @@ function group_select($selname,$selclass,$preselected = false,$size = 4) {
 				$selected = " selected=\"selected\" ";
 			else
 				$selected = '';
+
 			$trimmed = mb_substr($rr['name'],0,12);
 
 			$o .= "<option value=\"{$rr['id']}\" $selected title=\"{$rr['name']}\" >$trimmed</option>\r\n";
 		}
-	
+
 	}
 	$o .= "</select>\r\n";
 
@@ -76,26 +81,26 @@ function contact_selector($selname, $selclass, $preselected = false, $options) {
 		if(x($options,'networks')) {
 			switch($options['networks']) {
 				case 'DFRN_ONLY':
-					$networks = array('dfrn');
+					$networks = array(NETWORK_DFRN);
 					break;
 				case 'PRIVATE':
 					if(is_array($a->user) && $a->user['prvnets'])
-						$networks = array('dfrn','mail','dspr');
+						$networks = array(NETWORK_DFRN,NETWORK_MAIL,NETWORK_DIASPORA);
 					else
-						$networks = array('dfrn','face','mail', 'dspr');
+						$networks = array(NETWORK_DFRN,NETWORK_FACEBOOK,NETWORK_MAIL, NETWORK_DIASPORA);
 					break;
 				case 'TWO_WAY':
 					if(is_array($a->user) && $a->user['prvnets'])
-						$networks = array('dfrn','mail','dspr');
+						$networks = array(NETWORK_DFRN,NETWORK_MAIL,NETWORK_DIASPORA);
 					else
-						$networks = array('dfrn','face','mail','dspr','stat');
-					break;					
+						$networks = array(NETWORK_DFRN,NETWORK_FACEBOOK,NETWORK_MAIL,NETWORK_DIASPORA,NETWORK_OSTATUS);
+					break;
 				default:
 					break;
 			}
 		}
 	}
-		
+
 	$x = array('options' => $options, 'size' => $size, 'single' => $single, 'mutual' => $mutual, 'exclude' => $exclude, 'networks' => $networks);
 
 	call_hooks('contact_select_options', $x);
@@ -117,15 +122,15 @@ function contact_selector($selname, $selclass, $preselected = false, $options) {
 		$str_nets = implode(',',$x['networks']);
 		$sql_extra .= " AND `network` IN ( $str_nets ) ";
 	}
-	
+
 	$tabindex = (x($options, 'tabindex') ? "tabindex=\"" . $options["tabindex"] . "\"" : "");
 
 	if($x['single'])
 		$o .= "<select name=\"$selname\" id=\"$selclass\" class=\"$selclass\" size=\"" . $x['size'] . "\" $tabindex >\r\n";
-	else 
+	else
 		$o .= "<select name=\"{$selname}[]\" id=\"$selclass\" class=\"$selclass\" multiple=\"multiple\" size=\"" . $x['size'] . "$\" $tabindex >\r\n";
 
-	$r = q("SELECT `id`, `name`, `url`, `network` FROM `contact` 
+	$r = q("SELECT `id`, `name`, `url`, `network` FROM `contact`
 		WHERE `uid` = %d AND `self` = 0 AND `blocked` = 0 AND `pending` = 0 AND `archive` = 0 AND `notify` != ''
 		$sql_extra
 		ORDER BY `name` ASC ",
@@ -150,7 +155,7 @@ function contact_selector($selname, $selclass, $preselected = false, $options) {
 
 			$o .= "<option value=\"{$rr['id']}\" $selected title=\"{$rr['name']}|{$rr['url']}\" >$trimmed</option>\r\n";
 		}
-	
+
 	}
 
 	$o .= "</select>\r\n";
@@ -163,6 +168,8 @@ function contact_selector($selname, $selclass, $preselected = false, $options) {
 
 
 function contact_select($selname, $selclass, $preselected = false, $size = 4, $privmail = false, $celeb = false, $privatenet = false, $tabindex = null) {
+
+	require_once("include/bbcode.php");
 
 	$a = get_app();
 
@@ -177,21 +184,27 @@ function contact_select($selname, $selclass, $preselected = false, $size = 4, $p
 		$sql_extra .= sprintf(" AND `rel` = %d ", intval(CONTACT_IS_FRIEND));
 	}
 
-	if($privmail) {
-		$sql_extra .= " AND `network` IN ( 'dfrn', 'dspr' ) ";
-	}
-	elseif($privatenet) {	
-		$sql_extra .= " AND `network` IN ( 'dfrn', 'mail', 'face', 'dspr' ) ";
-	}
+	if($privmail)
+		$sql_extra .= sprintf(" AND `network` IN ('%s' , '%s') ",
+					NETWORK_DFRN, NETWORK_DIASPORA);
+	elseif($privatenet)
+		$sql_extra .= sprintf(" AND `network` IN ('%s' , '%s', '%s', '%s') ",
+					NETWORK_DFRN, NETWORK_MAIL, NETWORK_FACEBOOK, NETWORK_DIASPORA);
 
 	$tabindex = ($tabindex > 0 ? "tabindex=\"$tabindex\"" : "");
 
+	if ($privmail AND $preselected) {
+		$sql_extra .= " AND `id` IN (".implode(",", $preselected).")";
+		$hidepreselected = ' style="display: none;"';
+	} else
+		$hidepreselected = "";
+
 	if($privmail)
-		$o .= "<select name=\"$selname\" id=\"$selclass\" class=\"$selclass\" size=\"$size\" $tabindex >\r\n";
-	else 
+		$o .= "<select name=\"$selname\" id=\"$selclass\" class=\"$selclass\" size=\"$size\" $tabindex $hidepreselected>\r\n";
+	else
 		$o .= "<select name=\"{$selname}[]\" id=\"$selclass\" class=\"$selclass\" multiple=\"multiple\" size=\"$size\" $tabindex >\r\n";
 
-	$r = q("SELECT `id`, `name`, `url`, `network` FROM `contact` 
+	$r = q("SELECT `id`, `name`, `url`, `network` FROM `contact`
 		WHERE `uid` = %d AND `self` = 0 AND `blocked` = 0 AND `pending` = 0 AND `archive` = 0 AND `notify` != ''
 		$sql_extra
 		ORDER BY `name` ASC ",
@@ -205,6 +218,8 @@ function contact_select($selname, $selclass, $preselected = false, $size = 4, $p
 
 	call_hooks($a->module . '_pre_' . $selname, $arr);
 
+	$receiverlist = array();
+
 	if(count($r)) {
 		foreach($r as $rr) {
 			if((is_array($preselected)) && in_array($rr['id'], $preselected))
@@ -212,14 +227,22 @@ function contact_select($selname, $selclass, $preselected = false, $size = 4, $p
 			else
 				$selected = '';
 
-			$trimmed = mb_substr($rr['name'],0,20);
+			if($privmail)
+				$trimmed = GetProfileUsername($rr['url'], $rr['name'], false);
+			else
+				$trimmed = mb_substr($rr['name'],0,20);
+
+			$receiverlist[] = $trimmed;
 
 			$o .= "<option value=\"{$rr['id']}\" $selected title=\"{$rr['name']}|{$rr['url']}\" >$trimmed</option>\r\n";
 		}
-	
+
 	}
 
 	$o .= "</select>\r\n";
+
+	if ($privmail AND $preselected)
+		$o .= implode(", ", $receiverlist);
 
 	call_hooks($a->module . '_post_' . $selname, $o);
 
@@ -236,10 +259,10 @@ function prune_deadguys($arr) {
 	if(! $arr)
 		return $arr;
 	$str = dbesc(implode(',',$arr));
-	$r = q("select id from contact where id in ( " . $str . ") and blocked = 0 and pending = 0 and archive = 0 ");
+	$r = q("SELECT `id` FROM `contact` WHERE `id` IN ( " . $str . ") AND `blocked` = 0 AND `pending` = 0 AND `archive` = 0 ");
 	if($r) {
 		$ret = array();
-		foreach($r as $rr) 
+		foreach($r as $rr)
 			$ret[] = intval($rr['id']);
 		return $ret;
 	}
@@ -251,7 +274,7 @@ function get_acl_permissions($user = null) {
 	$allow_cid = $allow_gid = $deny_cid = $deny_gid = false;
 
 	if(is_array($user)) {
-		$allow_cid = ((strlen($user['allow_cid'])) 
+		$allow_cid = ((strlen($user['allow_cid']))
 			? explode('><', $user['allow_cid']) : array() );
 		$allow_gid = ((strlen($user['allow_gid']))
 			? explode('><', $user['allow_gid']) : array() );
@@ -276,62 +299,57 @@ function get_acl_permissions($user = null) {
 }
 
 
-function populate_acl($user = null,$celeb = false) {
+function populate_acl($user = null, $show_jotnets = false) {
 
 	$perms = get_acl_permissions($user);
 
-	// We shouldn't need to prune deadguys from the block list. Either way they can't get the message.
-	// Also no point enumerating groups and checking them, that will take place on delivery.
+	$jotnets = '';
+	if($show_jotnets) {
+		$mail_disabled = ((function_exists('imap_open') && (! get_config('system','imap_disabled'))) ? 0 : 1);
 
-//	$deny_cid = prune_deadguys($deny_cid);
+		$mail_enabled = false;
+		$pubmail_enabled = false;
 
+		if(! $mail_disabled) {
+			$r = q("SELECT `pubmail` FROM `mailacct` WHERE `uid` = %d AND `server` != '' LIMIT 1",
+				intval(local_user())
+			);
+			if(count($r)) {
+				$mail_enabled = true;
+				if(intval($r[0]['pubmail']))
+					$pubmail_enabled = true;
+			}
+		}
 
-	/*$o = '';
-	$o .= '<div id="acl-wrapper">';
-	$o .= '<div id="acl-permit-outer-wrapper">';
-	$o .= '<div id="acl-permit-text">' . t('Visible To:') . '</div><div id="jot-public">' . t('everybody') . '</div>';
-	$o .= '<div id="acl-permit-text-end"></div>';
-	$o .= '<div id="acl-permit-wrapper">';
-	$o .= '<div id="group_allow_wrapper">';
-	$o .= '<label id="acl-allow-group-label" for="group_allow" >' . t('Groups') . '</label>';
-	$o .= group_select('group_allow','group_allow',$allow_gid);
-	$o .= '</div>';
-	$o .= '<div id="contact_allow_wrapper">';
-	$o .= '<label id="acl-allow-contact-label" for="contact_allow" >' . t('Contacts') . '</label>';
-	$o .= contact_select('contact_allow','contact_allow',$allow_cid,4,false,$celeb,true);
-	$o .= '</div>';
-	$o .= '</div>' . "\r\n";
-	$o .= '<div id="acl-allow-end"></div>' . "\r\n";
-	$o .= '</div>';
-	$o .= '<div id="acl-deny-outer-wrapper">';
-	$o .= '<div id="acl-deny-text">' . t('Except For:') . '</div>';
-	$o .= '<div id="acl-deny-text-end"></div>';
-	$o .= '<div id="acl-deny-wrapper">';
-	$o .= '<div id="group_deny_wrapper" >';
-	$o .= '<label id="acl-deny-group-label" for="group_deny" >' . t('Groups') . '</label>';
-	$o .= group_select('group_deny','group_deny', $deny_gid);
-	$o .= '</div>';
-	$o .= '<div id="contact_deny_wrapper" >';
-	$o .= '<label id="acl-deny-contact-label" for="contact_deny" >' . t('Contacts') . '</label>';
-	$o .= contact_select('contact_deny','contact_deny', $deny_cid,4,false, $celeb,true);
-	$o .= '</div>';
-	$o .= '</div>' . "\r\n";
-	$o .= '<div id="acl-deny-end"></div>' . "\r\n";
-	$o .= '</div>';
-	$o .= '</div>' . "\r\n";
-	$o .= '<div id="acl-wrapper-end"></div>' . "\r\n";*/
+		if (!$user['hidewall']) {
+			if($mail_enabled) {
+				$selected = (($pubmail_enabled) ? ' checked="checked" ' : '');
+				$jotnets .= '<div class="profile-jot-net"><input type="checkbox" name="pubmail_enable"' . $selected . ' value="1" /> ' . t("Post to Email") . '</div>';
+			}
+
+			call_hooks('jot_networks', $jotnets);
+		} else
+			$jotnets .= sprintf(t('Connectors disabled, since "%s" is enabled.'),
+					    t('Hide your profile details from unknown viewers?'));
+		}
 
 	$tpl = get_markup_template("acl_selector.tpl");
 	$o = replace_macros($tpl, array(
 		'$showall'=> t("Visible to everybody"),
-		'$show'		 => t("show"),
-		'$hide'		 => t("don't show"),
+		'$show'	=> t("show"),
+		'$hide'	 => t("don't show"),
 		'$allowcid' => json_encode($perms['allow_cid']),
 		'$allowgid' => json_encode($perms['allow_gid']),
 		'$denycid' => json_encode($perms['deny_cid']),
 		'$denygid' => json_encode($perms['deny_gid']),
+		'$networks' => $show_jotnets,
+		'$emailcc' => t('CC: email addresses'),
+		'$emtitle' => t('Example: bob@example.com, mary@example.com'),
+		'$jotnets' => $jotnets,
+		'$aclModalTitle' => t('Permissions'),
+		'$aclModalDismiss' => t('Close'),
 		'$features' => array(
-			"aclautomention"=>(feature_enabled($user['uid'],"aclautomention")?"true":"false")
+		"aclautomention"=>(feature_enabled($user['uid'],"aclautomention")?"true":"false")
 		),
 	));
 
@@ -377,14 +395,14 @@ function acl_lookup(&$a, $out_type = 'json') {
 	if(!local_user())
 		return "";
 
+	$start	=	(x($_REQUEST,'start')		? $_REQUEST['start']		: 0);
+	$count	=	(x($_REQUEST,'count')		? $_REQUEST['count']		: 100);
+	$search	 =	(x($_REQUEST,'search')		? $_REQUEST['search']		: "");
+	$type	=	(x($_REQUEST,'type')		? $_REQUEST['type']		: "");
+	$mode	=	(x($_REQUEST,'smode')		? $_REQUEST['smode']		: "");
+	$conv_id =	(x($_REQUEST,'conversation')	? $_REQUEST['conversation']	: null);
 
-	$start = (x($_REQUEST,'start')?$_REQUEST['start']:0);
-	$count = (x($_REQUEST,'count')?$_REQUEST['count']:100);
-	$search = (x($_REQUEST,'search')?$_REQUEST['search']:"");
-	$type = (x($_REQUEST,'type')?$_REQUEST['type']:"");
-	$conv_id = (x($_REQUEST,'conversation')?$_REQUEST['conversation']:null);
-
-	// For use with jquery.autocomplete for private mail completion
+	// For use with jquery.textcomplete for private mail completion
 
 	if(x($_REQUEST,'query') && strlen($_REQUEST['query'])) {
 		if(! $type)
@@ -392,6 +410,7 @@ function acl_lookup(&$a, $out_type = 'json') {
 		$search = $_REQUEST['query'];
 	}
 
+	logger("Searching for ".$search." - type ".$type, LOGGER_DEBUG);
 
 	if ($search!=""){
 		$sql_extra = "AND `name` LIKE '%%".dbesc($search)."%%'";
@@ -410,22 +429,25 @@ function acl_lookup(&$a, $out_type = 'json') {
 		$group_count = 0;
 	}
 
+	$sql_extra2 .= " ".unavailable_networks();
+
+	// autocomplete for editor mentions
 	if ($type=='' || $type=='c'){
-		$r = q("SELECT COUNT(*) AS c FROM `contact` 
-				WHERE `uid` = %d AND `self` = 0 
+		$r = q("SELECT COUNT(*) AS c FROM `contact`
+				WHERE `uid` = %d AND `self` = 0
 				AND `blocked` = 0 AND `pending` = 0 AND `archive` = 0
 				AND `notify` != '' $sql_extra2" ,
 			intval(local_user())
 		);
 		$contact_count = (int)$r[0]['c'];
-	} 
+	}
 	elseif ($type == 'm') {
 
 		// autocomplete for Private Messages
 
-		$r = q("SELECT COUNT(*) AS c FROM `contact` 
-				WHERE `uid` = %d AND `self` = 0 
-				AND `blocked` = 0 AND `pending` = 0 AND `archive` = 0 
+		$r = q("SELECT COUNT(*) AS c FROM `contact`
+				WHERE `uid` = %d AND `self` = 0
+				AND `blocked` = 0 AND `pending` = 0 AND `archive` = 0
 				AND `network` IN ('%s','%s','%s') $sql_extra2" ,
 			intval(local_user()),
 			dbesc(NETWORK_DFRN),
@@ -439,8 +461,8 @@ function acl_lookup(&$a, $out_type = 'json') {
 
 		// autocomplete for Contacts
 
-		$r = q("SELECT COUNT(*) AS c FROM `contact` 
-				WHERE `uid` = %d AND `self` = 0 
+		$r = q("SELECT COUNT(*) AS c FROM `contact`
+				WHERE `uid` = %d AND `self` = 0
 				AND `pending` = 0 $sql_extra2" ,
 			intval(local_user())
 		);
@@ -449,22 +471,22 @@ function acl_lookup(&$a, $out_type = 'json') {
 	} else {
 		$contact_count = 0;
 	}
-	
-	
+
+
 	$tot = $group_count+$contact_count;
-	
+
 	$groups = array();
 	$contacts = array();
-	
+
 	if ($type=='' || $type=='g'){
-		
-		$r = q("SELECT `group`.`id`, `group`.`name`, GROUP_CONCAT(DISTINCT `group_member`.`contact-id` SEPARATOR ',') as uids
-				FROM `group`,`group_member` 
-				WHERE `group`.`deleted` = 0 AND `group`.`uid` = %d 
-					AND `group_member`.`gid`=`group`.`id`
+
+		$r = q("SELECT `group`.`id`, `group`.`name`, GROUP_CONCAT(DISTINCT `group_member`.`contact-id` SEPARATOR ',') AS uids
+				FROM `group`
+				INNER JOIN `group_member` ON `group_member`.`gid`=`group`.`id` AND `group_member`.`uid` = `group`.`uid`
+				WHERE NOT `group`.`deleted` AND `group`.`uid` = %d
 					$sql_extra
-				GROUP BY `group`.`id`
-				ORDER BY `group`.`name` 
+				GROUP BY `group`.`name`
+				ORDER BY `group`.`name`
 				LIMIT %d,%d",
 			intval(local_user()),
 			intval($start),
@@ -472,11 +494,11 @@ function acl_lookup(&$a, $out_type = 'json') {
 		);
 
 		foreach($r as $g){
-//		logger('acl: group: ' . $g['name'] . ' members: ' . $g['uids']);		
+//		logger('acl: group: ' . $g['name'] . ' members: ' . $g['uids']);
 			$groups[] = array(
 				"type"  => "g",
 				"photo" => "images/twopeople.png",
-				"name"  => $g['name'],
+				"name"  => htmlentities($g['name']),
 				"id"	=> intval($g['id']),
 				"uids"  => array_map("intval", explode(",",$g['uids'])),
 				"link"  => '',
@@ -484,18 +506,31 @@ function acl_lookup(&$a, $out_type = 'json') {
 			);
 		}
 	}
-	
-	if ($type=='' || $type=='c'){
-	
-		$r = q("SELECT `id`, `name`, `nick`, `micro`, `network`, `url`, `attag`, forum FROM `contact` 
+
+	if ($type==''){
+
+		$r = q("SELECT `id`, `name`, `nick`, `micro`, `network`, `url`, `attag`, `forum`, `prv` FROM `contact`
 			WHERE `uid` = %d AND `self` = 0 AND `blocked` = 0 AND `pending` = 0 AND `archive` = 0 AND `notify` != ''
+			AND NOT (`network` IN ('%s', '%s'))
 			$sql_extra2
 			ORDER BY `name` ASC ",
-			intval(local_user())
+			intval(local_user()),
+			dbesc(NETWORK_OSTATUS), dbesc(NETWORK_STATUSNET)
+		);
+	}
+	elseif ($type=='c'){
+
+		$r = q("SELECT `id`, `name`, `nick`, `micro`, `network`, `url`, `attag`, `forum`, `prv` FROM `contact`
+			WHERE `uid` = %d AND `self` = 0 AND `blocked` = 0 AND `pending` = 0 AND `archive` = 0 AND `notify` != ''
+			AND NOT (`network` IN ('%s'))
+			$sql_extra2
+			ORDER BY `name` ASC ",
+			intval(local_user()),
+			dbesc(NETWORK_STATUSNET)
 		);
 	}
 	elseif($type == 'm') {
-		$r = q("SELECT `id`, `name`, `nick`, `micro`, `network`, `url`, `attag` FROM `contact` 
+		$r = q("SELECT `id`, `name`, `nick`, `micro`, `network`, `url`, `attag` FROM `contact`
 			WHERE `uid` = %d AND `self` = 0 AND `blocked` = 0 AND `pending` = 0 AND `archive` = 0
 			AND `network` IN ('%s','%s','%s')
 			$sql_extra2
@@ -507,70 +542,71 @@ function acl_lookup(&$a, $out_type = 'json') {
 		);
 	}
 	elseif($type == 'a') {
-		$r = q("SELECT `id`, `name`, `nick`, `micro`, `network`, `url`, `attag` FROM `contact` 
+		$r = q("SELECT `id`, `name`, `nick`, `micro`, `network`, `url`, `attag`, `forum`, `prv` FROM `contact`
 			WHERE `uid` = %d AND `pending` = 0
 			$sql_extra2
 			ORDER BY `name` ASC ",
 			intval(local_user())
 		);
 	}
+	elseif($type == 'x') {
+		// autocomplete for global contact search (e.g. navbar search)
+		$r = navbar_complete($a);
+		$contacts = array();
+		if($r) {
+			foreach($r as $g) {
+				$contacts[] = array(
+					"photo"    => proxy_url($g['photo'], false, PROXY_SIZE_MICRO),
+					"name"     => $g['name'],
+					"nick"     => (x($g['addr']) ? $g['addr'] : $g['url']),
+					"network" => $g['network'],
+					"link" => $g['url'],
+					"forum"	   => (x($g['community']) ? 1 : 0),
+				);
+			}
+		}
+		$o = array(
+			'start' => $start,
+			'count'	=> $count,
+			'items'	=> $contacts,
+		);
+		echo json_encode($o);
+		killme();
+	}
 	else
 		$r = array();
 
-
-	if($type == 'm' || $type == 'a') {
-		$x = array();
-		$x['query'] = $search;
-		$x['photos'] = array();
-		$x['links'] = array();
-		$x['suggestions'] = array();
-		$x['data'] = array();
-		if(count($r)) {
-			foreach($r as $g) {
-				$x['photos'][] = $g['micro'];
-				$x['links'][] = $g['url'];
-				$x['suggestions'][] = $g['name'];
-				$x['data'][] = intval($g['id']);
-			}
-		}
-		echo json_encode($x);
-		killme();
-	}
 
 	if(count($r)) {
 		foreach($r as $g){
 			$contacts[] = array(
 				"type"  => "c",
-				"photo" => $g['micro'],
-				"name"  => $g['name'],
+				"photo" => proxy_url($g['micro'], false, PROXY_SIZE_MICRO),
+				"name"  => htmlentities($g['name']),
 				"id"	=> intval($g['id']),
 				"network" => $g['network'],
 				"link" => $g['url'],
-				"nick" => ($g['attag']) ? $g['attag'] : $g['nick'],
-				"forum" => $g['forum']
+				"nick" => htmlentities(($g['attag']) ? $g['attag'] : $g['nick']),
+				"forum" => ((x($g['forum']) || x($g['prv'])) ? 1 : 0),
 			);
-		}			
+		}
 	}
-		
+
 	$items = array_merge($groups, $contacts);
 
 	if ($conv_id) {
-		/* if $conv_id is set, get unknow contacts in thread */ 
+		/* if $conv_id is set, get unknow contacts in thread */
 		/* but first get know contacts url to filter them out */
 		function _contact_link($i){ return dbesc($i['link']); }
 		$known_contacts = array_map(_contact_link, $contacts);
 		$unknow_contacts=array();
-		$r = q("select 
-					`author-avatar`,`author-name`,`author-link`
-				from item where parent=%d
-				and (
-					`author-name` LIKE '%%%s%%' OR
-					`author-link` LIKE '%%%s%%'
-				) and 
-				`author-link` NOT IN ('%s')
+		$r = q("SELECT `author-avatar`,`author-name`,`author-link`
+				FROM `item` WHERE `parent` = %d
+					AND (`author-name` LIKE '%%%s%%' OR `author-link` LIKE '%%%s%%')
+					AND `author-link` NOT IN ('%s')
 				GROUP BY `author-link`
 				ORDER BY `author-name` ASC
-				", 
+				",
 				intval($conv_id),
 				dbesc($search),
 				dbesc($search),
@@ -586,12 +622,12 @@ function acl_lookup(&$a, $out_type = 'json') {
 				// /nickname
 				$unknow_contacts[] = array(
 					"type"  => "c",
-					"photo" => $row['author-avatar'],
-					"name"  => $row['author-name'],
+					"photo" => proxy_url($row['author-avatar'], false, PROXY_SIZE_MICRO),
+					"name"  => htmlentities($row['author-name']),
 					"id"	=> '',
 					"network" => "unknown",
 					"link" => $row['author-link'],
-					"nick" => $nick,
+					"nick" => htmlentities($nick),
 					"forum" => false
 				);
 			}
@@ -601,26 +637,84 @@ function acl_lookup(&$a, $out_type = 'json') {
 		$tot += count($unknow_contacts);
 	}
 
+	$results = array(
+		"tot"	=> $tot,
+		"start" => $start,
+		"count" => $count,
+		"groups" => $groups,
+		"contacts" => $contacts,
+		"items"	=> $items,
+		"type"	=> $type,
+		"search" => $search,
+	);
+
+	call_hooks('acl_lookup_end', $results);
+
 	if($out_type === 'html') {
 		$o = array(
-			'tot'		=> $tot,
-			'start'	=> $start,
-			'count'	=> $count,
-			'groups'	=> $groups,
-			'contacts'	=> $contacts,
+			'tot'		=> $results["tot"],
+			'start'		=> $results["start"],
+			'count'		=> $results["count"],
+			'groups'	=> $results["groups"],
+			'contacts'	=> $results["contacts"],
 		);
 		return $o;
 	}
-	
+
 	$o = array(
-		'tot'	=> $tot,
-		'start' => $start,
-		'count'	=> $count,
-		'items'	=> $items,
+		'tot'	=> $results["tot"],
+		'start' => $results["start"],
+		'count'	=> $results["count"],
+		'items'	=> $results["items"],
 	);
-	
+
 	echo json_encode($o);
 
 	killme();
 }
+/**
+ * @brief Searching for global contacts for autocompletion
+ * 
+ * @param App $a
+ * @return array with the search results
+ */
+function navbar_complete(&$a) {
 
+//	logger('navbar_complete');
+
+	if((get_config('system','block_public')) && (! local_user()) && (! remote_user())) {
+		return;
+	}
+
+	// check if searching in the local global contact table is enabled
+	$localsearch = get_config('system','poco_local_search');
+
+	$search = $prefix.notags(trim($_REQUEST['search']));
+	$mode = $_REQUEST['smode'];
+
+	// don't search if search term has less than 2 characters
+	if(! $search || mb_strlen($search) < 2)
+		return array();
+
+	if(substr($search,0,1) === '@')
+		$search = substr($search,1);
+
+	if($localsearch) {
+		$x = DirSearch::global_search_by_name($search, $mode);
+		return $x;
+	}
+
+	if(! $localsearch) {
+		$p = (($a->pager['page'] != 1) ? '&p=' . $a->pager['page'] : '');
+
+		$x = z_fetch_url(get_server().'/lsearch?f=' . $p .  '&search=' . urlencode($search));
+		if($x['success']) {
+			$t = 0;
+			$j = json_decode($x['body'],true);
+			if($j && $j['results']) {
+				return $j['results'];
+			}
+		}
+	}
+	return;
+}

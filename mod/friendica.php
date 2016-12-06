@@ -29,20 +29,28 @@ function friendica_init(&$a) {
 					$visible_plugins[] = $rr['name'];
 		}
 
+		load_config('feature_lock');
+		$locked_features = array();
+		if(is_array($a->config['feature_lock']) && count($a->config['feature_lock'])) {
+			foreach($a->config['feature_lock'] as $k => $v) {
+				if($k === 'config_loaded')
+					continue;
+				$locked_features[$k] = intval($v);
+			}
+		}
+
 		$data = Array(
 			'version' => FRIENDICA_VERSION,
 			'url' => z_root(),
 			'plugins' => $visible_plugins,
+			'locked_features' => $locked_features,
 			'register_policy' =>  $register_policy[$a->config['register_policy']],
 			'admin' => $admin,
 			'site_name' => $a->config['sitename'],
 			'platform' => FRIENDICA_PLATFORM,
 			'info' => ((x($a->config,'info')) ? $a->config['info'] : ''),
+			'no_scrape_url' => $a->get_baseurl().'/noscrape'
 		);
-		
-		//Enable noscrape?
-		if(!get_config('system','disable_noscrape'))
-			$data['no_scrape_url'] = $a->get_baseurl().'/noscrape';
 
 		echo json_encode($data);
 		killme();
@@ -64,7 +72,7 @@ function friendica_content(&$a) {
 
 	$o .= t('Please visit <a href="http://friendica.com">Friendica.com</a> to learn more about the Friendica project.') . '</p><p>';	
 
-	$o .= t('Bug reports and issues: please visit') . ' ' . '<a href="https://github.com/friendica/friendica/issues?state=open">the bucktracker at github</a></p><p>';
+	$o .= t('Bug reports and issues: please visit') . ' ' . '<a href="https://github.com/friendica/friendica/issues?state=open">'.t('the bugtracker at github').'</a></p><p>';
 	$o .= t('Suggestions, praise, donations, etc. - please email "Info" at Friendica - dot com') . '</p>';
 
 	$o .= '<p></p>';

@@ -345,20 +345,37 @@ class Photo {
     }
 
     public function orient($filename) {
+	if ($this->is_imagick()) {
+		// based off comment on http://php.net/manual/en/imagick.getimageorientation.php
+		$orientation = $this->image->getImageOrientation();
+		switch ($orientation) {
+		case imagick::ORIENTATION_BOTTOMRIGHT:
+		    $this->image->rotateimage("#000", 180);
+		    break;
+		case imagick::ORIENTATION_RIGHTTOP:
+		    $this->image->rotateimage("#000", 90);
+		    break;
+		case imagick::ORIENTATION_LEFTBOTTOM:
+		    $this->image->rotateimage("#000", -90);
+		    break;
+		}
+
+		$this->image->setImageOrientation(imagick::ORIENTATION_TOPLEFT);
+		return TRUE;
+	}
 	// based off comment on http://php.net/manual/en/function.imagerotate.php
 
 	if(!$this->is_valid())
-	    return FALSE;
+		return FALSE;
 
 	if( (! function_exists('exif_read_data')) || ($this->getType() !== 'image/jpeg') )
-	    return;
+		return;
 
-	$exif = @exif_read_data($filename);
+	$exif = @exif_read_data($filename,null,true);
+	if(! $exif)
+		return;
 
-		if(! $exif)
-			return;
-
-	$ort = $exif['Orientation'];
+	$ort = $exif['IFD0']['Orientation'];
 
 	switch($ort)
 	{
@@ -395,6 +412,10 @@ class Photo {
 		$this->rotate(90);
 		break;
 	}
+
+	//	logger('exif: ' . print_r($exif,true));
+	return $exif;
+
     }
 
 
@@ -516,7 +537,12 @@ class Photo {
 	    return FALSE;
 
 	$string = $this->imageString();
+
+	$a = get_app();
+
+	$stamp1 = microtime(true);
 	file_put_contents($path, $string);
+	$a->save_timestamp($stamp1, "file");
     }
 
     public function imageString() {
@@ -694,65 +720,101 @@ function guess_image_type($filename, $fromcurl=false) {
 
 }
 
-function import_profile_photo($photo,$uid,$cid) {
+/**
+ * @brief Updates the avatar links in a contact only if needed
+ *
+ * @param string $avatar Link to avatar picture
+ * @param int $uid User id of contact owner
+ * @param int $cid Contact id
+ * @param bool $force force picture update
+ *
+ * @return array Returns array of the different avatar sizes
+ */
+function update_contact_avatar($avatar,$uid,$cid, $force = false) {
 
-    $a = get_app();
+	$r = q("SELECT `avatar`, `photo`, `thumb`, `micro` FROM `contact` WHERE `id` = %d LIMIT 1", intval($cid));
+	if (!$r)
+		return false;
+	else
+		$data = array($r[0]["photo"], $r[0]["thumb"], $r[0]["micro"]);
 
-    $r = q("select `resource-id` from photo where `uid` = %d and `contact-id` = %d and `scale` = 4 and `album` = 'Contact Photos' limit 1",
-	intval($uid),
-	intval($cid)
-    );
-    if(count($r) && strlen($r[0]['resource-id'])) {
-	$hash = $r[0]['resource-id'];
-    }
-    else {
-	$hash = photo_new_resource();
-    }
+	if (($r[0]["avatar"] != $avatar) OR $force) {
+		$photos = import_profile_photo($avatar,$uid,$cid, true);
 
-    $photo_failure = false;
+		if ($photos) {
+			q("UPDATE `contact` SET `avatar` = '%s', `photo` = '%s', `thumb` = '%s', `micro` = '%s', `avatar-date` = '%s' WHERE `id` = %d",
+				dbesc($avatar), dbesc($photos[0]), dbesc($photos[1]), dbesc($photos[2]),
+				dbesc(datetime_convert()), intval($cid));
+			return $photos;
+		}
+	}
 
-    $filename = basename($photo);
-    $img_str = fetch_url($photo,true);
+	return $data;
+}
 
-    $type = guess_image_type($photo,true);
-    $img = new Photo($img_str, $type);
-    if($img->is_valid()) {
+function import_profile_photo($photo,$uid,$cid, $quit_on_error = false) {
 
-	$img->scaleImageSquare(175);
+	$a = get_app();
 
-	$r = $img->store($uid, $cid, $hash, $filename, 'Contact Photos', 4 );
+	$r = q("select `resource-id` from photo where `uid` = %d and `contact-id` = %d and `scale` = 4 and `album` = 'Contact Photos' limit 1",
+		intval($uid),
+		intval($cid)
+	);
+	if(count($r) && strlen($r[0]['resource-id'])) {
+		$hash = $r[0]['resource-id'];
+	} else {
+		$hash = photo_new_resource();
+    	}
 
-	if($r === false)
-	    $photo_failure = true;
+	$photo_failure = false;
 
-	$img->scaleImage(80);
+	$filename = basename($photo);
+	$img_str = fetch_url($photo,true);
 
-	$r = $img->store($uid, $cid, $hash, $filename, 'Contact Photos', 5 );
+	if ($quit_on_error AND ($img_str == ""))
+		return false;
 
-	if($r === false)
-	    $photo_failure = true;
+	$type = guess_image_type($photo,true);
+	$img = new Photo($img_str, $type);
+	if($img->is_valid()) {
 
-	$img->scaleImage(48);
+		$img->scaleImageSquare(175);
 
-	$r = $img->store($uid, $cid, $hash, $filename, 'Contact Photos', 6 );
+		$r = $img->store($uid, $cid, $hash, $filename, 'Contact Photos', 4 );
 
-	if($r === false)
-	    $photo_failure = true;
+		if($r === false)
+			$photo_failure = true;
 
-	$photo = $a->get_baseurl() . '/photo/' . $hash . '-4.' . $img->getExt();
-	$thumb = $a->get_baseurl() . '/photo/' . $hash . '-5.' . $img->getExt();
-	$micro = $a->get_baseurl() . '/photo/' . $hash . '-6.' . $img->getExt();
-    }
-    else
-	$photo_failure = true;
+		$img->scaleImage(80);
 
-    if($photo_failure) {
-	$photo = $a->get_baseurl() . '/images/person-175.jpg';
-	$thumb = $a->get_baseurl() . '/images/person-80.jpg';
-	$micro = $a->get_baseurl() . '/images/person-48.jpg';
-    }
+		$r = $img->store($uid, $cid, $hash, $filename, 'Contact Photos', 5 );
 
-    return(array($photo,$thumb,$micro));
+		if($r === false)
+			$photo_failure = true;
+
+		$img->scaleImage(48);
+
+		$r = $img->store($uid, $cid, $hash, $filename, 'Contact Photos', 6 );
+
+		if($r === false)
+			$photo_failure = true;
+
+		$photo = $a->get_baseurl() . '/photo/' . $hash . '-4.' . $img->getExt();
+		$thumb = $a->get_baseurl() . '/photo/' . $hash . '-5.' . $img->getExt();
+		$micro = $a->get_baseurl() . '/photo/' . $hash . '-6.' . $img->getExt();
+	} else
+		$photo_failure = true;
+
+	if($photo_failure AND $quit_on_error)
+		return false;
+
+	if($photo_failure) {
+		$photo = $a->get_baseurl() . '/images/person-175.jpg';
+		$thumb = $a->get_baseurl() . '/images/person-80.jpg';
+		$micro = $a->get_baseurl() . '/images/person-48.jpg';
+	}
+
+	return(array($photo,$thumb,$micro));
 
 }
 
@@ -761,17 +823,33 @@ function get_photo_info($url) {
 
 	$data = Cache::get($url);
 
-	if (is_null($data)) {
-		$img_str = fetch_url($url, true, $redirects, 4);
+	// Unserialise to be able to check in the next step if the cached data is alright.
+	if (!is_null($data))
+		$data = unserialize($data);
 
-		$tempfile = tempnam(get_temppath(), "cache");
-		file_put_contents($tempfile, $img_str);
-		$data = getimagesize($tempfile);
-		unlink($tempfile);
+	if (is_null($data) OR !$data) {
+		$img_str = fetch_url($url, true, $redirects, 4);
+		$filesize = strlen($img_str);
+
+		if (function_exists("getimagesizefromstring"))
+			$data = getimagesizefromstring($img_str);
+		else {
+			$tempfile = tempnam(get_temppath(), "cache");
+
+			$a = get_app();
+			$stamp1 = microtime(true);
+			file_put_contents($tempfile, $img_str);
+			$a->save_timestamp($stamp1, "file");
+
+			$data = getimagesize($tempfile);
+			unlink($tempfile);
+		}
+
+		if ($data)
+			$data["size"] = $filesize;
 
 		Cache::set($url, serialize($data));
-	} else
-		$data = unserialize($data);
+	}
 
 	return $data;
 }
@@ -837,16 +915,19 @@ function store_photo($a, $uid, $imagedata = "", $url = "") {
 
 	$page_owner_nick  = $r[0]['nickname'];
 
-//	To-Do:
-//	$default_cid      = $r[0]['id'];
-//	$community_page   = (($r[0]['page-flags'] == PAGE_COMMUNITY) ? true : false);
+	/// @TODO
+	/// $default_cid      = $r[0]['id'];
+	/// $community_page   = (($r[0]['page-flags'] == PAGE_COMMUNITY) ? true : false);
 
 	if ((strlen($imagedata) == 0) AND ($url == "")) {
 		logger("No image data and no url provided", LOGGER_DEBUG);
 		return(array());
 	} elseif (strlen($imagedata) == 0) {
 		logger("Uploading picture from ".$url, LOGGER_DEBUG);
+
+		$stamp1 = microtime(true);
 		$imagedata = @file_get_contents($url);
+		$a->save_timestamp($stamp1, "file");
 	}
 
 	$maximagesize = get_config('system','maximagesize');
@@ -870,7 +951,11 @@ function store_photo($a, $uid, $imagedata = "", $url = "") {
 */
 
 	$tempfile = tempnam(get_temppath(), "cache");
+
+	$stamp1 = microtime(true);
 	file_put_contents($tempfile, $imagedata);
+	$a->save_timestamp($stamp1, "file");
+
 	$data = getimagesize($tempfile);
 
 	if (!isset($data["mime"])) {
@@ -973,3 +1058,4 @@ function store_photo($a, $uid, $imagedata = "", $url = "") {
 
 	return($image);
 }
+

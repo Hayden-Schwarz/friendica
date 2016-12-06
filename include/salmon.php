@@ -1,15 +1,14 @@
 <?php
 
 require_once('include/crypto.php');
-
-
+require_once('include/Probe.php');
 
 function get_salmon_key($uri,$keyhash) {
 	$ret = array();
 
-	logger('Fetching salmon key');
+	logger('Fetching salmon key for '.$uri);
 
-	$arr = lrdd($uri);
+	$arr = Probe::lrdd($uri);
 
 	if(is_array($arr)) {
 		foreach($arr as $a) {
@@ -44,10 +43,10 @@ function get_salmon_key($uri,$keyhash) {
 	if(count($ret) == 1) {
 
 		// We only found one one key so we don't care if the hash matches.
-		// If it's the wrong key we'll find out soon enough because 
-		// message verification will fail. This also covers some older 
+		// If it's the wrong key we'll find out soon enough because
+		// message verification will fail. This also covers some older
 		// software which don't supply a keyhash. As long as they only
-		// have one key we'll be right. 
+		// have one key we'll be right.
 
 		return $ret[0];
 	}
@@ -62,41 +61,24 @@ function get_salmon_key($uri,$keyhash) {
 	return '';
 }
 
-	
-		
+
+
 function slapper($owner,$url,$slap) {
 
-	logger('slapper called. Data: ' . $slap);
-
-	// does contact have a salmon endpoint? 
+	// does contact have a salmon endpoint?
 
 	if(! strlen($url))
 		return;
 
 
 	if(! $owner['sprvkey']) {
-		logger(sprintf("slapper: user '%s' (%d) does not have a salmon private key. Send failed.",
+		logger(sprintf("user '%s' (%d) does not have a salmon private key. Send failed.",
 		$owner['username'],$owner['uid']));
 		return;
 	}
 
-	// add all namespaces to item
+	logger('slapper called for '.$url.'. Data: ' . $slap);
 
-$namespaces = <<< EOT
-<entry xmlns="http://www.w3.org/2005/Atom"
-      xmlns:thr="http://purl.org/syndication/thread/1.0"
-      xmlns:at="http://purl.org/atompub/tombstones/1.0"
-      xmlns:media="http://purl.org/syndication/atommedia"
-      xmlns:dfrn="http://purl.org/macgirvin/dfrn/1.0" 
-      xmlns:as="http://activitystrea.ms/spec/1.0/"
-      xmlns:georss="http://www.georss.org/georss" 
-      xmlns:poco="http://portablecontacts.net/spec/1.0" 
-      xmlns:ostatus="http://ostatus.org/schema/1.0" 
-	  xmlns:statusnet="http://status.net/schema/api/1/" >													>
-EOT;
-
-	$slap = str_replace('<entry>',$namespaces,$slap);
-	
 	// create a magic envelope
 
 	$data      = base64url_encode($slap);
@@ -125,7 +107,7 @@ EOT;
 		'$signature' => $signature
 	));
 
-	// slap them 
+	// slap them
 	post_url($url,$salmon, array(
 		'Content-type: application/magic-envelope+xml',
 		'Content-length: ' . strlen($salmon)
@@ -138,7 +120,7 @@ EOT;
 
 	if($return_code > 299) {
 
-		logger('slapper: compliant salmon failed. Falling back to status.net hack2');
+		logger('compliant salmon failed. Falling back to status.net hack2');
 
 		// Entirely likely that their salmon implementation is
 		// non-compliant. Let's try once more, this time only signing
@@ -152,7 +134,7 @@ EOT;
 			'$signature' => $signature2
 		));
 
-		// slap them 
+		// slap them
 		post_url($url,$salmon, array(
 			'Content-type: application/magic-envelope+xml',
 			'Content-length: ' . strlen($salmon)
@@ -162,11 +144,11 @@ EOT;
 
 		if($return_code > 299) {
 
-			logger('slapper: compliant salmon failed. Falling back to status.net hack3');
+			logger('compliant salmon failed. Falling back to status.net hack3');
 
 			// Entirely likely that their salmon implementation is
 			// non-compliant. Let's try once more, this time only signing
-			// the data, without the precomputed blob 
+			// the data, without the precomputed blob
 
 			$salmon = replace_macros($salmon_tpl,array(
 				'$data'      => $data,
@@ -176,7 +158,7 @@ EOT;
 				'$signature' => $signature3
 			));
 
-			// slap them 
+			// slap them
 			post_url($url,$salmon, array(
 				'Content-type: application/magic-envelope+xml',
 				'Content-length: ' . strlen($salmon)
@@ -184,7 +166,7 @@ EOT;
 			$return_code = $a->get_curl_code();
 		}
 	}
-	logger('slapper returned ' . $return_code); 
+	logger('slapper for '.$url.' returned ' . $return_code);
 	if(! $return_code)
 		return(-1);
 	if(($return_code == 503) && (stristr($a->get_curl_headers(),'retry-after')))

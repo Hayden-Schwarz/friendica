@@ -27,13 +27,14 @@ Friendica Documentation and Resources
 **Technical Documentation**
 
 * [Install](help/Install)
-* [Settings](help/Settings)
+* [Settings & Admin Panel](help/Settings)
 * [Plugins](help/Plugins)
-* [Installing Connectors (Facebook/Twitter/StatusNet)](help/Installing-Connectors)
+* [Installing Connectors (Twitter/GNU Social)](help/Installing-Connectors)
+* [Install an ejabberd server (XMPP chat) with synchronized credentials](help/install-ejabberd)
 * [Message Flow](help/Message-Flow)
 * [Using SSL with Friendica](help/SSL)
 * [Developers](help/Developers)
-* [Twitter/StatusNet API Functions](help/api)
+* [Twitter/GNU Social API Functions](help/api)
 * [Translation of Friendica](help/translations)
 
 

@@ -18,10 +18,14 @@
 require_once('include/crypto.php');
 require_once('include/enotify.php');
 require_once('include/email.php');
-require_once('library/langdet/Text/LanguageDetect.php');
 require_once('include/tags.php');
 require_once('include/files.php');
 require_once('include/threads.php');
+require_once('include/text.php');
+require_once('include/items.php');
+require_once('include/Scrape.php');
+require_once('include/diaspora.php');
+require_once('include/Contact.php');
 
 function item_post(&$a) {
 
@@ -33,7 +37,6 @@ function item_post(&$a) {
 	$uid = local_user();
 
 	if(x($_REQUEST,'dropitems')) {
-		require_once('include/items.php');
 		$arr_drop = explode(',',$_REQUEST['dropitems']);
 		drop_items($arr_drop);
 		$json = array('success' => 1);
@@ -90,14 +93,14 @@ function item_post(&$a) {
 			$r = q("SELECT * FROM `item` WHERE `id` = %d LIMIT 1",
 				intval($parent)
 			);
-		}
-		elseif($parent_uri && local_user()) {
+		} elseif($parent_uri && local_user()) {
 			// This is coming from an API source, and we are logged in
 			$r = q("SELECT * FROM `item` WHERE `uri` = '%s' AND `uid` = %d LIMIT 1",
 				dbesc($parent_uri),
 				intval(local_user())
 			);
 		}
+
 		// if this isn't the real parent of the conversation, find it
 		if($r !== false && count($r)) {
 			$parid = $r[0]['parent'];
@@ -129,6 +132,39 @@ function item_post(&$a) {
 			);
 			if(count($r))
 				$parent_contact = $r[0];
+
+			// If the contact id doesn't fit with the contact, then set the contact to null
+			$thrparent = q("SELECT `author-link`, `network` FROM `item` WHERE `uri` = '%s' LIMIT 1", dbesc($thr_parent));
+			if (count($thrparent) AND ($thrparent[0]["network"] === NETWORK_OSTATUS)
+				AND (normalise_link($parent_contact["url"]) != normalise_link($thrparent[0]["author-link"]))) {
+				$parent_contact = null;
+
+				$r = q("SELECT * FROM `gcontact` WHERE `nurl` = '%s' LIMIT 1",
+					dbesc(normalise_link($thrparent[0]["author-link"])));
+				if (count($r)) {
+					$parent_contact = $r[0];
+					$parent_contact["thumb"] = $parent_contact["photo"];
+					$parent_contact["micro"] = $parent_contact["photo"];
+					unset($parent_contact["id"]);
+				}
+
+				if (!isset($parent_contact["nick"])) {
+					require_once("include/Scrape.php");
+					$probed_contact = probe_url($thrparent[0]["author-link"]);
+					if ($probed_contact["network"] != NETWORK_FEED) {
+						$parent_contact = $probed_contact;
+						$parent_contact["nurl"] = normalise_link($probed_contact["url"]);
+						$parent_contact["thumb"] = $probed_contact["photo"];
+						$parent_contact["micro"] = $probed_contact["photo"];
+						$parent_contact["addr"] = $probed_contact["addr"];
+					}
+				}
+				logger('no contact found: '.print_r($thrparent, true), LOGGER_DEBUG);
+			} else
+				logger('parent contact: '.print_r($parent_contact, true), LOGGER_DEBUG);
+
+			if ($parent_contact["nick"] == "")
+				$parent_contact["nick"] = $parent_contact["name"];
 		}
 	}
 
@@ -154,10 +190,6 @@ function item_post(&$a) {
 
 	// Now check that it is a page_type of PAGE_BLOG, and that valid personal details
 	// have been provided, and run any anti-spam plugins
-
-
-	// TODO
-
 
 
 
@@ -213,11 +245,11 @@ function item_post(&$a) {
 
 	} else {
 
-		// if coming from the API and no privacy settings are set, 
+		// if coming from the API and no privacy settings are set,
 		// use the user default permissions - as they won't have
 		// been supplied via a form.
 
-		if(($api_source) 
+		if(($api_source)
 			&& (! array_key_exists('contact_allow',$_REQUEST))
 			&& (! array_key_exists('group_allow',$_REQUEST))
 			&& (! array_key_exists('contact_deny',$_REQUEST))
@@ -247,32 +279,8 @@ function item_post(&$a) {
 		$guid              = get_guid(32);
 
 
-		$naked_body = preg_replace('/\[(.+?)\]/','',$body);
-
-		if (version_compare(PHP_VERSION, '5.3.0', '>=')) {
-			$l = new Text_LanguageDetect;
-			//$lng = $l->detectConfidence($naked_body);
-			//$postopts = (($lng['language']) ? 'lang=' . $lng['language'] . ';' . $lng['confidence'] : '');
-
-			$lng = $l->detect($naked_body, 3);
-
-			if (sizeof($lng) > 0) {
-				$postopts = "";
-
-				foreach ($lng as $language => $score) {
-					if ($postopts == "")
-						$postopts = "lang=";
-					else
-						$postopts .= ":";
-
-					$postopts .= $language.";".$score;
-				}
-			}
-
-			logger('mod_item: detect language' . print_r($lng,true) . $naked_body, LOGGER_DATA);
-		}
-		else
-			$postopts = '';
+		item_add_language_opt($_REQUEST);
+		$postopts = $_REQUEST['postopts'] ? $_REQUEST['postopts'] : "";
 
 
 		$private = ((strlen($str_group_allow) || strlen($str_contact_allow) || strlen($str_group_deny) || strlen($str_contact_deny)) ? 1 : 0);
@@ -345,7 +353,7 @@ function item_post(&$a) {
 
 	// Work around doubled linefeeds in Tinymce 3.5b2
 	// First figure out if it's a status post that would've been
-	// created using tinymce. Otherwise leave it alone. 
+	// created using tinymce. Otherwise leave it alone.
 
 /*	$plaintext = (local_user() ? intval(get_pconfig(local_user(),'system','plaintext')) || !feature_enabled($profile_uid,'richtext') : 0);
 	if((! $parent) && (! $api_source) && (! $plaintext)) {
@@ -366,8 +374,7 @@ function item_post(&$a) {
 	if((local_user()) && (local_user() == $profile_uid)) {
 		$self = true;
 		$r = q("SELECT * FROM `contact` WHERE `uid` = %d AND `self` = 1 LIMIT 1",
-			intval($_SESSION['uid'])
-		);
+			intval($_SESSION['uid']));
 	}
 	elseif(remote_user()) {
 		if(is_array($_SESSION['remote'])) {
@@ -499,10 +506,11 @@ function item_post(&$a) {
 		}
 	}
 
-	// embedded bookmark in post? set bookmark flag
+	// embedded bookmark or attachment in post? set bookmark flag
 
 	$bookmark = 0;
-	if(preg_match_all("/\[bookmark\=([^\]]*)\](.*?)\[\/bookmark\]/ism",$body,$match,PREG_SET_ORDER)) {
+	$data = get_attachment_data($body);
+        if (preg_match_all("/\[bookmark\=([^\]]*)\](.*?)\[\/bookmark\]/ism", $body, $match, PREG_SET_ORDER) OR isset($data["type"])) {
 		$objecttype = ACTIVITY_OBJ_BOOKMARK;
 		$bookmark = 1;
 	}
@@ -514,7 +522,7 @@ function item_post(&$a) {
 	 * Fold multi-line [code] sequences
 	 */
 
-	$body = preg_replace('/\[\/code\]\s*\[code\]/ism',"\n",$body); 
+	$body = preg_replace('/\[\/code\]\s*\[code\]/ism',"\n",$body);
 
 	$body = scale_external_images($body,false);
 
@@ -549,10 +557,30 @@ function item_post(&$a) {
 	 * and we are replying, and there isn't one already
 	 */
 
-	if(($parent_contact) && ($parent_contact['network'] === NETWORK_OSTATUS) 
-		&& ($parent_contact['nick']) && (! in_array('@' . $parent_contact['nick'],$tags))) {
-		$body = '@' . $parent_contact['nick'] . ' ' . $body;
-		$tags[] = '@' . $parent_contact['nick'];
+	if($parent AND ($parent_contact['network'] === NETWORK_OSTATUS)) {
+		if ($parent_contact['id'] != "")
+			$contact = '@'.$parent_contact['nick'].'+'.$parent_contact['id'];
+		else
+			$contact = '@[url='.$parent_contact['url'].']'.$parent_contact['nick'].'[/url]';
+
+		if (!in_array($contact,$tags)) {
+			$body = $contact.' '.$body;
+			$tags[] = $contact;
+		}
+
+		$toplevel_contact = "";
+		$toplevel_parent = q("SELECT `contact`.* FROM `contact`
+						INNER JOIN `item` ON `item`.`contact-id` = `contact`.`id` AND `contact`.`url` = `item`.`author-link`
+						WHERE `item`.`id` = `item`.`parent` AND `item`.`parent` = %d", intval($parent));
+		if ($toplevel_parent)
+			$toplevel_contact = '@'.$toplevel_parent[0]['nick'].'+'.$toplevel_parent[0]['id'];
+		else {
+			$toplevel_parent = q("SELECT `author-link`, `author-name` FROM `item` WHERE `id` = `parent` AND `parent` = %d", intval($parent));
+			$toplevel_contact = '@[url='.$toplevel_parent[0]['author-link'].']'.$toplevel_parent[0]['author-name'].'[/url]';
+		}
+
+		if (!in_array($toplevel_contact,$tags))
+			$tags[] = $toplevel_contact;
 	}
 
 	$tagged = array();
@@ -561,6 +589,9 @@ function item_post(&$a) {
 
 	if(count($tags)) {
 		foreach($tags as $tag) {
+
+			if(strpos($tag,'#') === 0)
+				continue;
 
 			// If we already tagged 'Robert Johnson', don't try and tag 'Robert'.
 			// Robert Johnson should be first in the $tags array
@@ -604,7 +635,7 @@ function item_post(&$a) {
 			if(count($r)) {
 				if(strlen($attachments))
 					$attachments .= ',';
-				$attachments .= '[attach]href="' . $a->get_baseurl() . '/attach/' . $r[0]['id'] . '" length="' . $r[0]['filesize'] . '" type="' . $r[0]['filetype'] . '" title="' . (($r[0]['filename']) ? $r[0]['filename'] : '') . '"[/attach]'; 
+				$attachments .= '[attach]href="' . $a->get_baseurl() . '/attach/' . $r[0]['id'] . '" length="' . $r[0]['filesize'] . '" type="' . $r[0]['filetype'] . '" title="' . (($r[0]['filename']) ? $r[0]['filename'] : '') . '"[/attach]';
 			}
 			$body = str_replace($match[1],'',$body);
 		}
@@ -623,14 +654,14 @@ function item_post(&$a) {
 
 	$gravity = (($parent) ? 6 : 0 );
 
-	// even if the post arrived via API we are considering that it 
+	// even if the post arrived via API we are considering that it
 	// originated on this site by default for determining relayability.
 
 	$origin = ((x($_REQUEST,'origin')) ? intval($_REQUEST['origin']) : 1);
 
 	$notify_type = (($parent) ? 'comment-new' : 'wall-new' );
 
-	$uri = (($message_id) ? $message_id : item_new_uri($a->get_hostname(),$profile_uid));
+	$uri = (($message_id) ? $message_id : item_new_uri($a->get_hostname(),$profile_uid, $guid));
 
 	// Fallback so that we alway have a thr-parent
 	if(!$thr_parent)
@@ -646,9 +677,11 @@ function item_post(&$a) {
 	$datarray['owner-name']    = $contact_record['name'];
 	$datarray['owner-link']    = $contact_record['url'];
 	$datarray['owner-avatar']  = $contact_record['thumb'];
+	$datarray["owner-id"]      = get_contact($datarray["owner-link"], 0);
 	$datarray['author-name']   = $author['name'];
 	$datarray['author-link']   = $author['url'];
 	$datarray['author-avatar'] = $author['thumb'];
+	$datarray["author-id"]     = get_contact($datarray["author-link"], 0);
 	$datarray['created']       = datetime_convert();
 	$datarray['edited']        = datetime_convert();
 	$datarray['commented']     = datetime_convert();
@@ -679,6 +712,8 @@ function item_post(&$a) {
 	$datarray['postopts']      = $postopts;
 	$datarray['origin']        = $origin;
 	$datarray['moderated']     = $allow_moderated;
+	$datarray['gcontact-id']   = get_gcontact_id(array("url" => $datarray['author-link'], "network" => $datarray['network'],
+							"photo" => $datarray['author-avatar'], "name" => $datarray['author-name']));
 
 	/**
 	 * These fields are for the convenience of plugins...
@@ -692,6 +727,9 @@ function item_post(&$a) {
 
 	if($orig_post)
 		$datarray['edit']      = true;
+
+	// Search for hashtags
+	item_body_set_hashtags($datarray);
 
 	// preview mode - prepare the body for display and send it via json
 
@@ -720,14 +758,18 @@ function item_post(&$a) {
 		killme();
 	}
 
+	// Fill the cache field
+	put_item_in_cache($datarray);
 
 	if($orig_post) {
-		$r = q("UPDATE `item` SET `title` = '%s', `body` = '%s', `tag` = '%s', `attach` = '%s', `file` = '%s', `edited` = '%s', `changed` = '%s' WHERE `id` = %d AND `uid` = %d",
+		$r = q("UPDATE `item` SET `title` = '%s', `body` = '%s', `tag` = '%s', `attach` = '%s', `file` = '%s', `rendered-html` = '%s', `rendered-hash` = '%s', `edited` = '%s', `changed` = '%s' WHERE `id` = %d AND `uid` = %d",
 			dbesc($datarray['title']),
 			dbesc($datarray['body']),
 			dbesc($datarray['tag']),
 			dbesc($datarray['attach']),
 			dbesc($datarray['file']),
+			dbesc($datarray['rendered-html']),
+			dbesc($datarray['rendered-hash']),
 			dbesc(datetime_convert()),
 			dbesc(datetime_convert()),
 			intval($post_id),
@@ -741,7 +783,7 @@ function item_post(&$a) {
 		// update filetags in pconfig
 		file_tag_update_pconfig($uid,$categories_old,$categories_new,'category');
 
-		proc_run('php', "include/notifier.php", 'edit_post', "$post_id");
+		proc_run(PRIORITY_HIGH, "include/notifier.php", 'edit_post', $post_id);
 		if((x($_REQUEST,'return')) && strlen($return_path)) {
 			logger('return: ' . $return_path);
 			goaway($a->get_baseurl() . "/" . $return_path );
@@ -752,10 +794,24 @@ function item_post(&$a) {
 		$post_id = 0;
 
 
-	$r = q("INSERT INTO `item` (`guid`, `extid`, `uid`,`type`,`wall`,`gravity`, `network`, `contact-id`,`owner-name`,`owner-link`,`owner-avatar`, 
-		`author-name`, `author-link`, `author-avatar`, `created`, `edited`, `commented`, `received`, `changed`, `uri`, `thr-parent`, `title`, `body`, `app`, `location`, `coord`, 
-		`tag`, `inform`, `verb`, `object-type`, `postopts`, `allow_cid`, `allow_gid`, `deny_cid`, `deny_gid`, `private`, `pubmail`, `attach`, `bookmark`,`origin`, `moderated`, `file` )
-		VALUES( '%s', '%s', %d, '%s', %d, %d, '%s', %d, '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', %d, %d, '%s', %d, %d, %d, '%s' )",
+	$r = q("INSERT INTO `item` (`guid`, `extid`, `uid`,`type`,`wall`,`gravity`, `network`, `contact-id`,
+					`owner-name`,`owner-link`,`owner-avatar`, `owner-id`,
+					`author-name`, `author-link`, `author-avatar`, `author-id`,
+					`created`, `edited`, `commented`, `received`, `changed`,
+					`uri`, `thr-parent`, `title`, `body`, `app`, `location`, `coord`,
+					`tag`, `inform`, `verb`, `object-type`, `postopts`,
+					`allow_cid`, `allow_gid`, `deny_cid`, `deny_gid`, `private`,
+					`pubmail`, `attach`, `bookmark`,`origin`, `moderated`, `file`,
+					`rendered-html`, `rendered-hash`)
+		VALUES('%s', '%s', %d, '%s', %d, %d, '%s', %d,
+			'%s', '%s', '%s', %d,
+			'%s', '%s', '%s', %d,
+			'%s', '%s', '%s', '%s', '%s',
+			'%s', '%s', '%s', '%s', '%s', '%s', '%s',
+			'%s', '%s', '%s', '%s', '%s',
+			'%s', '%s', '%s', '%s', %d,
+			%d, '%s', %d, %d, %d, '%s',
+			'%s', '%s')",
 		dbesc($datarray['guid']),
 		dbesc($datarray['extid']),
 		intval($datarray['uid']),
@@ -767,9 +823,11 @@ function item_post(&$a) {
 		dbesc($datarray['owner-name']),
 		dbesc($datarray['owner-link']),
 		dbesc($datarray['owner-avatar']),
+		intval($datarray['owner-id']),
 		dbesc($datarray['author-name']),
 		dbesc($datarray['author-link']),
 		dbesc($datarray['author-avatar']),
+		intval($datarray['author-id']),
 		dbesc($datarray['created']),
 		dbesc($datarray['edited']),
 		dbesc($datarray['commented']),
@@ -797,128 +855,120 @@ function item_post(&$a) {
 		intval($datarray['bookmark']),
 		intval($datarray['origin']),
 		intval($datarray['moderated']),
-		dbesc($datarray['file'])
+		dbesc($datarray['file']),
+		dbesc($datarray['rendered-html']),
+		dbesc($datarray['rendered-hash'])
 	       );
 
 	$r = q("SELECT `id` FROM `item` WHERE `uri` = '%s' LIMIT 1",
 		dbesc($datarray['uri']));
-	if(count($r)) {
-		$post_id = $r[0]['id'];
-		logger('mod_item: saved item ' . $post_id);
-		add_thread($post_id);
-
-		// update filetags in pconfig
-		file_tag_update_pconfig($uid,$categories_old,$categories_new,'category');
-
-		// Store the fresh generated item into the cache
-		$cachefile = get_cachefile(urlencode($datarray["guid"])."-".hash("md5", $datarray['body']));
-
-		if (($cachefile != '') AND !file_exists($cachefile)) {
-			$s = prepare_text($datarray['body']);
-			$stamp1 = microtime(true);
-			file_put_contents($cachefile, $s);
-			$a->save_timestamp($stamp1, "file");
-			logger('mod_item: put item '.$r[0]['id'].' into cachefile '.$cachefile);
-		}
-
-		if($parent) {
-
-			// This item is the last leaf and gets the comment box, clear any ancestors
-			$r = q("UPDATE `item` SET `last-child` = 0, `changed` = '%s' WHERE `parent` = %d ",
-				dbesc(datetime_convert()),
-				intval($parent)
-			);
-			update_thread($parent, true);
-
-			// Inherit ACLs from the parent item.
-
-			$r = q("UPDATE `item` SET `allow_cid` = '%s', `allow_gid` = '%s', `deny_cid` = '%s', `deny_gid` = '%s', `private` = %d
-				WHERE `id` = %d",
-				dbesc($parent_item['allow_cid']),
-				dbesc($parent_item['allow_gid']),
-				dbesc($parent_item['deny_cid']),
-				dbesc($parent_item['deny_gid']),
-				intval($parent_item['private']),
-				intval($post_id)
-			);
-
-			if($contact_record != $author) {
-				notification(array(
-					'type'         => NOTIFY_COMMENT,
-					'notify_flags' => $user['notify-flags'],
-					'language'     => $user['language'],
-					'to_name'      => $user['username'],
-					'to_email'     => $user['email'],
-					'uid'          => $user['uid'],
-					'item'         => $datarray,
-					'link'		=> $a->get_baseurl().'/display/'.urlencode($datarray['guid']),
-					'source_name'  => $datarray['author-name'],
-					'source_link'  => $datarray['author-link'],
-					'source_photo' => $datarray['author-avatar'],
-					'verb'         => ACTIVITY_POST,
-					'otype'        => 'item',
-					'parent'       => $parent,
-					'parent_uri'   => $parent_item['uri']
-				));
-
-			}
-
-
-			// Store the comment signature information in case we need to relay to Diaspora
-			store_diaspora_comment_sig($datarray, $author, ($self ? $a->user['prvkey'] : false), $parent_item, $post_id);
-
-		} else {
-			$parent = $post_id;
-
-			if($contact_record != $author) {
-				notification(array(
-					'type'         => NOTIFY_WALL,
-					'notify_flags' => $user['notify-flags'],
-					'language'     => $user['language'],
-					'to_name'      => $user['username'],
-					'to_email'     => $user['email'],
-					'uid'          => $user['uid'],
-					'item'         => $datarray,
-					'link'		=> $a->get_baseurl().'/display/'.urlencode($datarray['guid']),
-					'source_name'  => $datarray['author-name'],
-					'source_link'  => $datarray['author-link'],
-					'source_photo' => $datarray['author-avatar'],
-					'verb'         => ACTIVITY_POST,
-					'otype'        => 'item'
-				));
-			}
-		}
-
-		// fallback so that parent always gets set to non-zero.
-
-		if(! $parent)
-			$parent = $post_id;
-
-		$r = q("UPDATE `item` SET `parent` = %d, `parent-uri` = '%s', `plink` = '%s', `changed` = '%s', `last-child` = 1, `visible` = 1
-			WHERE `id` = %d",
-			intval($parent),
-			dbesc(($parent == $post_id) ? $uri : $parent_item['uri']),
-			dbesc($a->get_baseurl().'/display/'.urlencode($datarray['guid'])),
-			dbesc(datetime_convert()),
-			intval($post_id)
-		);
-
-		// photo comments turn the corresponding item visible to the profile wall
-		// This way we don't see every picture in your new photo album posted to your wall at once.
-		// They will show up as people comment on them.
-
-		if(! $parent_item['visible']) {
-			$r = q("UPDATE `item` SET `visible` = 1 WHERE `id` = %d",
-				intval($parent_item['id'])
-			);
-			update_thread($parent_item['id']);
-		}
-	}
-	else {
+	if(!count($r)) {
 		logger('mod_item: unable to retrieve post that was just stored.');
 		notice( t('System error. Post not saved.') . EOL);
 		goaway($a->get_baseurl() . "/" . $return_path );
 		// NOTREACHED
+	}
+
+	$post_id = $r[0]['id'];
+	logger('mod_item: saved item ' . $post_id);
+
+	$datarray["id"] = $post_id;
+	$datarray["plink"] = $a->get_baseurl().'/display/'.urlencode($datarray["guid"]);
+
+	// update filetags in pconfig
+	file_tag_update_pconfig($uid,$categories_old,$categories_new,'category');
+
+	if($parent) {
+
+		// This item is the last leaf and gets the comment box, clear any ancestors
+		$r = q("UPDATE `item` SET `last-child` = 0, `changed` = '%s' WHERE `parent` = %d ",
+			dbesc(datetime_convert()),
+			intval($parent)
+		);
+		update_thread($parent, true);
+
+		// Inherit ACLs from the parent item.
+
+		$r = q("UPDATE `item` SET `allow_cid` = '%s', `allow_gid` = '%s', `deny_cid` = '%s', `deny_gid` = '%s', `private` = %d
+			WHERE `id` = %d",
+			dbesc($parent_item['allow_cid']),
+			dbesc($parent_item['allow_gid']),
+			dbesc($parent_item['deny_cid']),
+			dbesc($parent_item['deny_gid']),
+			intval($parent_item['private']),
+			intval($post_id)
+		);
+
+		if($contact_record != $author) {
+			notification(array(
+				'type'         => NOTIFY_COMMENT,
+				'notify_flags' => $user['notify-flags'],
+				'language'     => $user['language'],
+				'to_name'      => $user['username'],
+				'to_email'     => $user['email'],
+				'uid'          => $user['uid'],
+				'item'         => $datarray,
+				'link'		=> $a->get_baseurl().'/display/'.urlencode($datarray['guid']),
+				'source_name'  => $datarray['author-name'],
+				'source_link'  => $datarray['author-link'],
+				'source_photo' => $datarray['author-avatar'],
+				'verb'         => ACTIVITY_POST,
+				'otype'        => 'item',
+				'parent'       => $parent,
+				'parent_uri'   => $parent_item['uri']
+			));
+
+		}
+
+
+		// Store the comment signature information in case we need to relay to Diaspora
+		diaspora::store_comment_signature($datarray, $author, ($self ? $user['prvkey'] : false), $post_id);
+
+	} else {
+		$parent = $post_id;
+
+		if($contact_record != $author) {
+			notification(array(
+				'type'         => NOTIFY_WALL,
+				'notify_flags' => $user['notify-flags'],
+				'language'     => $user['language'],
+				'to_name'      => $user['username'],
+				'to_email'     => $user['email'],
+				'uid'          => $user['uid'],
+				'item'         => $datarray,
+				'link'		=> $a->get_baseurl().'/display/'.urlencode($datarray['guid']),
+				'source_name'  => $datarray['author-name'],
+				'source_link'  => $datarray['author-link'],
+				'source_photo' => $datarray['author-avatar'],
+				'verb'         => ACTIVITY_POST,
+				'otype'        => 'item'
+			));
+		}
+	}
+
+	// fallback so that parent always gets set to non-zero.
+
+	if(! $parent)
+		$parent = $post_id;
+
+	$r = q("UPDATE `item` SET `parent` = %d, `parent-uri` = '%s', `plink` = '%s', `changed` = '%s', `last-child` = 1, `visible` = 1
+		WHERE `id` = %d",
+		intval($parent),
+		dbesc(($parent == $post_id) ? $uri : $parent_item['uri']),
+		dbesc($a->get_baseurl().'/display/'.urlencode($datarray['guid'])),
+		dbesc(datetime_convert()),
+		intval($post_id)
+	);
+
+	// photo comments turn the corresponding item visible to the profile wall
+	// This way we don't see every picture in your new photo album posted to your wall at once.
+	// They will show up as people comment on them.
+
+	if(! $parent_item['visible']) {
+		$r = q("UPDATE `item` SET `visible` = 1 WHERE `id` = %d",
+			intval($parent_item['id'])
+		);
+		update_thread($parent_item['id']);
 	}
 
 	// update the commented timestamp on the parent
@@ -928,10 +978,8 @@ function item_post(&$a) {
 		dbesc(datetime_convert()),
 		intval($parent)
 	);
-	update_thread($parent);
-
-	$datarray['id']    = $post_id;
-	$datarray['plink'] = $a->get_baseurl().'/display/'.urlencode($datarray['guid']);
+	if ($post_id != $parent)
+		update_thread($parent);
 
 	call_hooks('post_local_end', $datarray);
 
@@ -942,10 +990,10 @@ function item_post(&$a) {
 				$addr = trim($recip);
 				if(! strlen($addr))
 					continue;
-				$disclaimer = '<hr />' . sprintf( t('This message was sent to you by %s, a member of the Friendica social network.'),$a->user['username']) 
+				$disclaimer = '<hr />' . sprintf( t('This message was sent to you by %s, a member of the Friendica social network.'),$a->user['username'])
 					. '<br />';
 				$disclaimer .= sprintf( t('You may visit them online at %s'), $a->get_baseurl() . '/profile/' . $a->user['nickname']) . EOL;
-				$disclaimer .= t('Please contact the sender by replying to this post if you do not wish to receive these messages.') . EOL; 
+				$disclaimer .= t('Please contact the sender by replying to this post if you do not wish to receive these messages.') . EOL;
 				if (!$datarray['title']=='') {
 				    $subject = email_header_encode($datarray['title'],'UTF-8');
 				} else {
@@ -964,14 +1012,16 @@ function item_post(&$a) {
 				    'htmlVersion' => $message,
 				    'textVersion' => html2plain($html.$disclaimer),
 				);
-				enotify::send($params);
+				Emailer::send($params);
 			}
 		}
 	}
 
 	create_tags_from_item($post_id);
 	create_files_from_item($post_id);
-	update_thread($post_id);
+
+	if ($post_id == $parent)
+		add_thread($post_id);
 
 	// This is a real juggling act on shared hosting services which kill your processes
 	// e.g. dreamhost. We used to start delivery to our native delivery agents in the background
@@ -982,7 +1032,7 @@ function item_post(&$a) {
 	// Currently the only realistic fixes are to use a reliable server - which precludes shared hosting,
 	// or cut back on plugins which do remote deliveries.
 
-	proc_run('php', "include/notifier.php", $notify_type, "$post_id");
+	proc_run(PRIORITY_HIGH, "include/notifier.php", $notify_type, $post_id);
 
 	logger('post_complete');
 
@@ -1021,10 +1071,9 @@ function item_content(&$a) {
 
 	$o = '';
 	if(($a->argc == 3) && ($a->argv[1] === 'drop') && intval($a->argv[2])) {
-		require_once('include/items.php'); 
 		$o = drop_item($a->argv[2], !is_ajax());
 		if (is_ajax()){
-			// ajax return: [<item id>, 0 (no perm) | <owner id>] 
+			// ajax return: [<item id>, 0 (no perm) | <owner id>]
 			echo json_encode(array(intval($a->argv[2]), intval($o)));
 			killme();
 		}
@@ -1033,174 +1082,193 @@ function item_content(&$a) {
 }
 
 /**
- * This function removes the tag $tag from the text $body and replaces it with 
- * the appropiate link. 
- * 
+ * This function removes the tag $tag from the text $body and replaces it with
+ * the appropiate link.
+ *
  * @param unknown_type $body the text to replace the tag in
- * @param unknown_type $inform a comma-seperated string containing everybody to inform
- * @param unknown_type $str_tags string to add the tag to
- * @param unknown_type $profile_uid
- * @param unknown_type $tag the tag to replace
+ * @param string $inform a comma-seperated string containing everybody to inform
+ * @param string $str_tags string to add the tag to
+ * @param integer $profile_uid
+ * @param string $tag the tag to replace
+ * @param string $network The network of the post
  *
  * @return boolean true if replaced, false if not replaced
  */
 function handle_tag($a, &$body, &$inform, &$str_tags, $profile_uid, $tag, $network = "") {
+	require_once("include/Scrape.php");
+	require_once("include/socgraph.php");
 
 	$replaced = false;
 	$r = null;
 
-	//is it a hash tag?
-	if(strpos($tag,'#') === 0) {
-		//if the tag is replaced...
-		if(strpos($tag,'[url='))
-			//...do nothing
-			return $replaced;
-		//base tag has the tags name only
-		$basetag = str_replace('_',' ',substr($tag,1));
-		//create text for link
-		$newtag = '#[url=' . $a->get_baseurl() . '/search?tag=' . rawurlencode($basetag) . ']' . $basetag . '[/url]';
-		//replace tag by the link
-		$body = str_replace($tag, $newtag, $body);
-		$replaced = true;
-
-		//is the link already in str_tags?
-		if(! stristr($str_tags,$newtag)) {
-			//append or set str_tags
-			if(strlen($str_tags))
-				$str_tags .= ',';
-			$str_tags .= $newtag;
-		}
-		return $replaced;
-	}
 	//is it a person tag?
 	if(strpos($tag,'@') === 0) {
 		//is it already replaced?
-		if(strpos($tag,'[url='))
-			return $replaced;
-		$stat = false;
-		//get the person's name
-		$name = substr($tag,1);
-		//is it a link or a full dfrn address?
-		if((strpos($name,'@')) || (strpos($name,'http://'))) {
-			$newname = $name;
-			//get the profile links
-			$links = @lrdd($name);
-			if(count($links)) {
-				//for all links, collect how is to inform and how's profile is to link
-				foreach($links as $link) {
-					if($link['@attributes']['rel'] === 'http://webfinger.net/rel/profile-page')
-						$profile = $link['@attributes']['href'];
-					if($link['@attributes']['rel'] === 'salmon') {
-						if(strlen($inform))
-							$inform .= ',';
-						$inform .= 'url:' . str_replace(',','%2c',$link['@attributes']['href']);
+		if(strpos($tag,'[url=')) {
+			//append tag to str_tags
+			if(!stristr($str_tags,$tag)) {
+				if(strlen($str_tags))
+					$str_tags .= ',';
+				$str_tags .= $tag;
+			}
+
+			// Checking for the alias that is used for OStatus
+			$pattern = "/@\[url\=(.*?)\](.*?)\[\/url\]/ism";
+			if (preg_match($pattern, $tag, $matches)) {
+
+				$r = q("SELECT `alias`, `name` FROM `contact` WHERE `nurl` = '%s' AND `alias` != '' AND `uid` = 0",
+					normalise_link($matches[1]));
+				if (!$r)
+					$r = q("SELECT `alias`, `name` FROM `gcontact` WHERE `nurl` = '%s' AND `alias` != ''",
+						normalise_link($matches[1]));
+				if ($r)
+					$data = $r[0];
+				else
+					$data = probe_url($matches[1]);
+
+				if ($data["alias"] != "") {
+					$newtag = '@[url='.$data["alias"].']'.$data["name"].'[/url]';
+					if(!stristr($str_tags,$newtag)) {
+						if(strlen($str_tags))
+							$str_tags .= ',';
+						$str_tags .= $newtag;
 					}
 				}
 			}
-		} elseif (($network != NETWORK_OSTATUS) AND ($network != NETWORK_TWITTER) AND
-			($network != NETWORK_STATUSNET) AND ($network != NETWORK_APPNET)) {
-			//if it is a name rather than an address
-			$newname = $name;
-			$alias = '';
-			$tagcid = 0;
-			//is it some generated name?
-			if(strrpos($newname,'+')) {
-				//get the id
-				$tagcid = intval(substr($newname,strrpos($newname,'+') + 1));
-				//remove the next word from tag's name
-				if(strpos($name,' ')) {
-					$name = substr($name,0,strpos($name,' '));
+
+			return $replaced;
+		}
+		$stat = false;
+		//get the person's name
+		$name = substr($tag,1);
+
+		// Sometimes the tag detection doesn't seem to work right
+		// This is some workaround
+		$nameparts = explode(" ", $name);
+		$name = $nameparts[0];
+
+		// Try to detect the contact in various ways
+		if ((strpos($name,'@')) || (strpos($name,'http://'))) {
+			// Is it in format @user@domain.tld or @http://domain.tld/...?
+
+			// First check the contact table for the address
+			$r = q("SELECT `id`, `url`, `nick`, `name`, `alias`, `network`, `notify` FROM `contact`
+				WHERE `addr` = '%s' AND `uid` = %d AND
+					(`network` != '%s' OR (`notify` != '' AND `alias` != ''))
+				LIMIT 1",
+					dbesc($name),
+					intval($profile_uid),
+					dbesc(NETWORK_OSTATUS)
+			);
+
+			// Then check in the contact table for the url
+			if (!$r)
+				$r = q("SELECT `id`, `url`, `nick`, `name`, `alias`, `network`, `notify` FROM `contact`
+					WHERE `nurl` = '%s' AND `uid` = %d AND
+						(`network` != '%s' OR (`notify` != '' AND `alias` != ''))
+					LIMIT 1",
+						dbesc(normalise_link($name)),
+						intval($profile_uid),
+						dbesc(NETWORK_OSTATUS)
+				);
+
+			// Then check in the global contacts for the address
+			if (!$r)
+				$r = q("SELECT `url`, `nick`, `name`, `alias`, `network`, `notify` FROM `gcontact`
+					WHERE `addr` = '%s' AND (`network` != '%s' OR (`notify` != '' AND `alias` != ''))
+					LIMIT 1",
+						dbesc($name),
+						dbesc(NETWORK_OSTATUS)
+				);
+
+			// Then check in the global contacts for the url
+			if (!$r)
+				$r = q("SELECT `url`, `nick`, `name`, `alias`, `network`, `notify` FROM `gcontact`
+					WHERE `nurl` = '%s' AND (`network` != '%s' OR (`notify` != '' AND `alias` != ''))
+					LIMIT 1",
+						dbesc(normalise_link($name)),
+						dbesc(NETWORK_OSTATUS)
+				);
+
+			if (!$r) {
+				$probed = probe_url($name);
+				if ($result['network'] != NETWORK_PHANTOM) {
+					update_gcontact($probed);
+					$r = q("SELECT `url`, `name`, `nick`, `network`, `alias`, `notify` FROM `gcontact` WHERE `nurl` = '%s' LIMIT 1",
+						dbesc(normalise_link($probed["url"])));
 				}
 			}
-			if($tagcid) { //if there was an id
-				//select contact with that id from the logged in user's contact list
-				$r = q("SELECT * FROM `contact` WHERE `id` = %d AND `uid` = %d LIMIT 1",
+		} else {
+			$r = false;
+			if (strrpos($name,'+')) {
+				// Is it in format @nick+number?
+				$tagcid = intval(substr($name,strrpos($name,'+') + 1));
+
+				$r = q("SELECT `id`, `url`, `nick`, `name`, `alias`, `network` FROM `contact` WHERE `id` = %d AND `uid` = %d LIMIT 1",
 						intval($tagcid),
 						intval($profile_uid)
 				);
 			}
-			else {
-				$newname = str_replace('_',' ',$name);
 
-				// At first try to fetch a contact according to the given network
-				if ($network != "") {
-					//select someone from this user's contacts by name
-					$r = q("SELECT * FROM `contact` WHERE `name` = '%s' AND `network` = '%s' AND `uid` = %d LIMIT 1",
-							dbesc($newname),
-							dbesc($network),
-							intval($profile_uid)
-					);
-					if(! $r) {
-						//select someone by attag or nick and the name passed in
-						$r = q("SELECT * FROM `contact` WHERE `attag` = '%s' OR `nick` = '%s' AND `network` = '%s' AND `uid` = %d ORDER BY `attag` DESC LIMIT 1",
-								dbesc($name),
-								dbesc($name),
-								dbesc($network),
-								intval($profile_uid)
-						);
-					}
-				} else
-					$r = false;
-
-				if(! $r) {
-					//select someone from this user's contacts by name
-					$r = q("SELECT * FROM `contact` WHERE `name` = '%s' AND `uid` = %d LIMIT 1",
-							dbesc($newname),
-							intval($profile_uid)
-					);
-				}
-
-				if(! $r) {
-					//select someone by attag or nick and the name passed in
-					$r = q("SELECT * FROM `contact` WHERE `attag` = '%s' OR `nick` = '%s' AND `uid` = %d ORDER BY `attag` DESC LIMIT 1",
-							dbesc($name),
-							dbesc($name),
-							intval($profile_uid)
-					);
-				}
-			}
-/*			} elseif(strstr($name,'_') || strstr($name,' ')) { //no id
-				//get the real name
-				$newname = str_replace('_',' ',$name);
-				//select someone from this user's contacts by name
-				$r = q("SELECT * FROM `contact` WHERE `name` = '%s' AND `uid` = %d LIMIT 1",
-						dbesc($newname),
+			//select someone by attag or nick and the name passed in the current network
+			if(!$r AND ($network != ""))
+				$r = q("SELECT `id`, `url`, `nick`, `name`, `alias`, `network` FROM `contact` WHERE `attag` = '%s' OR `nick` = '%s' AND `network` = '%s' AND `uid` = %d ORDER BY `attag` DESC LIMIT 1",
+						dbesc($name),
+						dbesc($name),
+						dbesc($network),
 						intval($profile_uid)
 				);
-			} else {
-				//select someone by attag or nick and the name passed in
-				$r = q("SELECT * FROM `contact` WHERE `attag` = '%s' OR `nick` = '%s' AND `uid` = %d ORDER BY `attag` DESC LIMIT 1",
+
+			//select someone from this user's contacts by name in the current network
+			if (!$r AND ($network != ""))
+				$r = q("SELECT `id`, `url`, `nick`, `name`, `alias`, `network` FROM `contact` WHERE `name` = '%s' AND `network` = '%s' AND `uid` = %d LIMIT 1",
+						dbesc($name),
+						dbesc($network),
+						intval($profile_uid)
+				);
+
+			//select someone by attag or nick and the name passed in
+			if(!$r)
+				$r = q("SELECT `id`, `url`, `nick`, `name`, `alias`, `network` FROM `contact` WHERE `attag` = '%s' OR `nick` = '%s' AND `uid` = %d ORDER BY `attag` DESC LIMIT 1",
 						dbesc($name),
 						dbesc($name),
 						intval($profile_uid)
 				);
-			}*/
-			//$r is set, if someone could be selected
-			if(count($r)) {
-				$profile = $r[0]['url'];
-				//set newname to nick, find alias
-				if(($r[0]['network'] === NETWORK_OSTATUS) OR ($r[0]['network'] === NETWORK_TWITTER)
-					OR ($r[0]['network'] === NETWORK_STATUSNET) OR ($r[0]['network'] === NETWORK_APPNET)) {
-					$newname = $r[0]['nick'];
-					$stat = true;
-					if($r[0]['alias'])
-						$alias = $r[0]['alias'];
-				}
-				else
-					$newname = $r[0]['name'];
-				//add person's id to $inform
-				if(strlen($inform))
-					$inform .= ',';
-				$inform .= 'cid:' . $r[0]['id'];
-			}
+
+
+			//select someone from this user's contacts by name
+			if(!$r)
+				$r = q("SELECT `id`, `url`, `nick`, `name`, `alias`, `network` FROM `contact` WHERE `name` = '%s' AND `uid` = %d LIMIT 1",
+						dbesc($name),
+						intval($profile_uid)
+				);
 		}
+
+		if ($r) {
+			if(strlen($inform) AND (isset($r[0]["notify"]) OR isset($r[0]["id"])))
+				$inform .= ',';
+
+			if (isset($r[0]["id"]))
+				$inform .= 'cid:' . $r[0]["id"];
+			elseif (isset($r[0]["notify"]))
+				$inform  .= $r[0]["notify"];
+
+			$profile = $r[0]["url"];
+			$alias   = $r[0]["alias"];
+			$newname = $r[0]["nick"];
+			if (($newname == "") OR (($r[0]["network"] != NETWORK_OSTATUS) AND ($r[0]["network"] != NETWORK_TWITTER)
+				AND ($r[0]["network"] != NETWORK_STATUSNET) AND ($r[0]["network"] != NETWORK_APPNET)))
+				$newname = $r[0]["name"];
+		}
+
 		//if there is an url for this persons profile
-		if(isset($profile)) {
+		if (isset($profile) AND ($newname != "")) {
+
 			$replaced = true;
 			//create profile link
 			$profile = str_replace(',','%2c',$profile);
-			$newtag = '@[url=' . $profile . ']' . $newname	. '[/url]';
-			$body = str_replace('@' . $name, $newtag, $body);
+			$newtag = '@[url='.$profile.']'.$newname.'[/url]';
+			$body = str_replace('@'.$name, $newtag, $body);
 			//append tag to str_tags
 			if(! stristr($str_tags,$newtag)) {
 				if(strlen($str_tags))
@@ -1212,7 +1280,7 @@ function handle_tag($a, &$body, &$inform, &$str_tags, $profile_uid, $tag, $netwo
 			// subscribed to you. But the nickname URL is OK if they are. Grrr. We'll tag both.
 
 			if(strlen($alias)) {
-				$newtag = '@[url=' . $alias . ']' . $newname	. '[/url]';
+				$newtag = '@[url='.$alias.']'.$newname.'[/url]';
 				if(! stristr($str_tags,$newtag)) {
 					if(strlen($str_tags))
 						$str_tags .= ',';
@@ -1223,43 +1291,4 @@ function handle_tag($a, &$body, &$inform, &$str_tags, $profile_uid, $tag, $netwo
 	}
 
 	return array('replaced' => $replaced, 'contact' => $r[0]);
-}
-
-
-function store_diaspora_comment_sig($datarray, $author, $uprvkey, $parent_item, $post_id) {
-	// We won't be able to sign Diaspora comments for authenticated visitors - we don't have their private key
-
-	$enabled = intval(get_config('system','diaspora_enabled'));
-	if(! $enabled) {
-		logger('mod_item: diaspora support disabled, not storing comment signature', LOGGER_DEBUG);
-		return;
-	}
-
-
-	logger('mod_item: storing diaspora comment signature');
-
-	require_once('include/bb2diaspora.php');
-	$signed_body = html_entity_decode(bb2diaspora($datarray['body']));
-
-	// Only works for NETWORK_DFRN
-	$contact_baseurl_start = strpos($author['url'],'://') + 3;
-	$contact_baseurl_length = strpos($author['url'],'/profile') - $contact_baseurl_start;
-	$contact_baseurl = substr($author['url'], $contact_baseurl_start, $contact_baseurl_length);
-	$diaspora_handle = $author['nick'] . '@' . $contact_baseurl;
-
-	$signed_text = $datarray['guid'] . ';' . $parent_item['guid'] . ';' . $signed_body . ';' . $diaspora_handle;
-
-	if( $uprvkey !== false )
-		$authorsig = base64_encode(rsa_sign($signed_text,$uprvkey,'sha256'));
-	else
-		$authorsig = '';
-
-	q("insert into sign (`iid`,`signed_text`,`signature`,`signer`) values (%d,'%s','%s','%s') ",
-		intval($post_id),
-		dbesc($signed_text),
-		dbesc(base64_encode($authorsig)),
-		dbesc($diaspora_handle)
-	);
-
-	return;
 }

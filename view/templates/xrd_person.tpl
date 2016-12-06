@@ -1,10 +1,9 @@
 
 <?xml version="1.0" encoding="UTF-8"?>
-<XRD xmlns="http://docs.oasis-open.org/ns/xri/xrd-1.0">
- 
-    <Subject>{{$accturi}}</Subject>
-	<Alias>{{$accturi}}</Alias>
-    <Alias>{{$profile_url}}</Alias>
+<XRD xmlns="http://docs.oasis-open.org/ns/xri/xrd-1.0"> 
+	<Subject>{{$accturi}}</Subject>
+ 	<Alias>{{$profile_url}}</Alias>
+	<Alias>{{$alias}}</Alias>
  
     <Link rel="http://purl.org/macgirvin/dfrn/1.0"
           href="{{$profile_url}}" />
@@ -29,6 +28,8 @@
           href="{{$salmon}}" />
     <Link rel="http://salmon-protocol.org/ns/salmon-mention" 
           href="{{$salmen}}" />
+    <Link rel="http://ostatus.org/schema/1.0/subscribe"
+          template="{{$subscribe}}" />
     <Link rel="magic-public-key" 
           href="{{$modexp}}" />
  

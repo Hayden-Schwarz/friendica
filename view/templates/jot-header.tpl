@@ -8,20 +8,29 @@ var plaintext = '{{$editselect}}';
 
 function initEditor(cb){
 	if (editor==false){
+		var  colorbox_options = {
+			{{if $APP->is_mobile}}
+			'width' : '100%',
+			'height' : '100%',
+			{{/if}}
+			'inline' : true,
+			'transition' : 'elastic'
+		}
+		
+		
+		
 		$("#profile-jot-text-loading").show();
 		if(plaintext == 'none') {
 			$("#profile-jot-text-loading").hide();
 			$("#profile-jot-text").css({ 'height': 200, 'color': '#000' });
-			$("#profile-jot-text").contact_autocomplete(baseurl+"/acl");
+			$("#profile-jot-text").editor_autocomplete(baseurl+"/acl");
+			$("#profile-jot-text").bbco_autocomplete('bbcode');
 			editor = true;
-			$("a#jot-perms-icon").colorbox({
-				'inline' : true,
-				'transition' : 'elastic'
-			});
+			$("a#jot-perms-icon").colorbox(colorbox_options);
 			$(".jothidden").show();
 			if (typeof cb!="undefined") cb();
 			return;
-		}	
+		}
 		tinyMCE.init({
 			theme : "advanced",
 			mode : "specific_textareas",
@@ -74,7 +83,7 @@ function initEditor(cb){
 					}
 					else {
 						$('#profile-jot-desc').html('&nbsp;');
-					}	 
+					}
 
 				 //Character count
 
@@ -107,10 +116,7 @@ function initEditor(cb){
 		});
 		editor = true;
 		// setup acl popup
-		$("a#jot-perms-icon").colorbox({
-			'inline' : true,
-			'transition' : 'elastic'
-		}); 
+		$("a#jot-perms-icon").colorbox(colorbox_options);
 	} else {
 		if (typeof cb!="undefined") cb();
 	}
@@ -127,37 +133,66 @@ function enableOnUser(){
 <script>
 	var ispublic = '{{$ispublic}}';
 
+
 	$(document).ready(function() {
-		
+
 		/* enable tinymce on focus and click */
 		$("#profile-jot-text").focus(enableOnUser);
 		$("#profile-jot-text").click(enableOnUser);
 
-		var uploader = new window.AjaxUpload(
-			'wall-image-upload',
-			{ action: 'wall_upload/{{$nickname}}',
-				name: 'userfile',
-				onSubmit: function(file,ext) { $('#profile-rotator').show(); },
-				onComplete: function(file,response) {
-					addeditortext(response);
-					$('#profile-rotator').hide();
-				}				 
-			}
-		);
-		var file_uploader = new window.AjaxUpload(
-			'wall-file-upload',
-			{ action: 'wall_attach/{{$nickname}}',
-				name: 'userfile',
-				onSubmit: function(file,ext) { $('#profile-rotator').show(); },
-				onComplete: function(file,response) {
-					addeditortext(response);
-					$('#profile-rotator').hide();
-				}				 
-			}
-		);
 
 
+
+		/* show images / file browser window
+		 *
+		 **/
+
+		/* callback */
+		$('body').on('fbrowser.image.main', function(e, filename, embedcode, id) {
+			$.colorbox.close();
+			addeditortext(embedcode);
+		});
+		$('body').on('fbrowser.file.main', function(e, filename, embedcode, id) {
+			$.colorbox.close();
+			addeditortext(embedcode);
+		});
+
+		$('#wall-image-upload').on('click', function(){
+			Dialog.doImageBrowser("main");
+		});
+
+		$('#wall-file-upload').on('click', function(){
+			Dialog.doFileBrowser("main");
+		});
+
+		/**
+			var uploader = new window.AjaxUpload(
+				'wall-image-upload',
+				{ action: 'wall_upload/{{$nickname}}',
+					name: 'userfile',
+					onSubmit: function(file,ext) { $('#profile-rotator').show(); },
+					onComplete: function(file,response) {
+						addeditortext(response);
+						$('#profile-rotator').hide();
+					}
+				}
+			);
+			var file_uploader = new window.AjaxUpload(
+				'wall-file-upload',
+				{ action: 'wall_attach/{{$nickname}}',
+					name: 'userfile',
+					onSubmit: function(file,ext) { $('#profile-rotator').show(); },
+					onComplete: function(file,response) {
+						addeditortext(response);
+						$('#profile-rotator').hide();
+					}
+				}
+			);
+
+		}
+		**/
 	});
+
 
 	function deleteCheckedItems() {
 		if(confirm('{{$delitems}}')) {
@@ -174,7 +209,7 @@ function enableOnUser(){
 					else {
 						checkedstr = $(this).val();
 					}
-				}	
+				}
 			});
 			$.post('item', { dropitems: checkedstr }, function(data) {
 				window.location.reload();
@@ -272,9 +307,9 @@ function enableOnUser(){
 	}
 
 	function itemFiler(id) {
-		
+
 		var bordercolor = $("input").css("border-color");
-		
+
 		$.get('filer/', function(data){
 			$.colorbox({html:data});
 			$("#id_term").keypress(function(){
@@ -283,7 +318,7 @@ function enableOnUser(){
 			$("#select_term").change(function(){
 				$("#id_term").css("border-color",bordercolor);
 			})
-			
+
 			$("#filer_save").click(function(e){
 				e.preventDefault();
 				reply = $("#id_term").val();
@@ -301,7 +336,7 @@ function enableOnUser(){
 				return false;
 			});
 		});
-		
+
 	}
 
 	function jotClearLocation() {
@@ -316,7 +351,7 @@ function enableOnUser(){
 		}
 		else
 			tinyMCE.execCommand('mceInsertRawHTML',false,data);
-	}	
+	}
 
 	{{$geotag}}
 

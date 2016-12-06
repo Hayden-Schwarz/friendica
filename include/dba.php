@@ -1,4 +1,5 @@
 <?php
+require_once("dbm.php");
 
 # if PDO is avaible for mysql, use the new database abstraction
 # TODO: PDO is disabled for release 3.3. We need to investigate why
@@ -14,8 +15,7 @@ if(class_exists('\PDO') && in_array('mysql', PDO::getAvailableDrivers())) {
 require_once('include/datetime.php');
 
 /**
- *
- * MySQL database class
+ * @class MySQL database class
  *
  * For debugging, insert 'dbg(1);' anywhere in the program flow.
  * dbg(0); will turn it off. Logging is performed at LOGGER_DATA level.
@@ -66,6 +66,8 @@ class dba {
 			if(! mysqli_connect_errno()) {
 				$this->connected = true;
 			}
+			if (isset($a->config["system"]["db_charset"]))
+				$this->db->set_charset($a->config["system"]["db_charset"]);
 		}
 		else {
 			$this->mysqli = false;
@@ -73,6 +75,8 @@ class dba {
 			if($this->db && mysql_select_db($db,$this->db)) {
 				$this->connected = true;
 			}
+			if (isset($a->config["system"]["db_charset"]))
+				mysql_set_charset($a->config["system"]["db_charset"], $this->db);
 		}
 		if(! $this->connected) {
 			$this->db = null;
@@ -95,6 +99,14 @@ class dba {
 
 		$this->error = '';
 
+		// Check the connection (This can reconnect the connection - if configured)
+		if ($this->mysqli)
+			$connected = $this->db->ping();
+		else
+			$connected = mysql_ping($this->db);
+
+		$connstr = ($connected ? "Connected": "Disonnected");
+
 		$stamp1 = microtime(true);
 
 		if($this->mysqli)
@@ -106,6 +118,9 @@ class dba {
 		$duration = (float)($stamp2-$stamp1);
 
 		$a->save_timestamp($stamp1, "database");
+
+		if (strtolower(substr($sql, 0, 6)) != "select")
+			$a->save_timestamp($stamp1, "database_write");
 
 		if(x($a->config,'system') && x($a->config['system'],'db_log')) {
 			if (($duration > $a->config["system"]["db_loglimit"])) {
@@ -119,14 +134,17 @@ class dba {
 		}
 
 		if($this->mysqli) {
-			if($this->db->errno)
+			if($this->db->errno) {
 				$this->error = $this->db->error;
+				$this->errorno = $this->db->errno;
+			}
+		} elseif(mysql_errno($this->db)) {
+			$this->error = mysql_error($this->db);
+			$this->errorno = mysql_errno($this->db);
 		}
-		elseif(mysql_errno($this->db))
-				$this->error = mysql_error($this->db);
 
 		if(strlen($this->error)) {
-			logger('dba: ' . $this->error);
+			logger('DB Error ('.$connstr.') '.$this->errorno.': '.$this->error);
 		}
 
 		if($this->debug) {
@@ -341,4 +359,3 @@ function dbesc_array(&$arr) {
 function dba_timer() {
 	return microtime(true);
 }
-

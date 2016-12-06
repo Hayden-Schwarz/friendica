@@ -43,7 +43,7 @@ nav a {
   color: #737373;
 }
 
-nav #search-box #search-text {
+nav #nav-search-box #nav-search-text {
   border-radius: 5px;
 }
 
@@ -120,5 +120,9 @@ div.pager, ul.tabs {
 }
 
 .mail-list-wrapper {
+  border-radius: 5px;
+}
+
+#viewcontact_wrapper-network {
   border-radius: 5px;
 }

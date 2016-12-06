@@ -1,11 +1,37 @@
 <?php
-
+/**
+ * @fiel mod/events.php
+ * @brief The events module
+ */
 require_once('include/bbcode.php');
 require_once('include/datetime.php');
 require_once('include/event.php');
 require_once('include/items.php');
 
+function events_init(&$a) {
+	if(! local_user())
+		return;
+
+	if($a->argc == 1) {
+		// if it's a json request abort here becaus we don't
+		// need the widget data
+		if($a->argv[1] === 'json')
+			return;
+
+		$cal_widget = widget_events();
+
+		if(! x($a->page,'aside'))
+			$a->page['aside'] = '';
+
+		$a->page['aside'] .= $cal_widget;
+	}
+
+	return;
+}
+
 function events_post(&$a) {
+
+	logger('post: ' . print_r($_REQUEST,true));
 
 	if(! local_user())
 		return;
@@ -13,17 +39,9 @@ function events_post(&$a) {
 	$event_id = ((x($_POST,'event_id')) ? intval($_POST['event_id']) : 0);
 	$cid = ((x($_POST,'cid')) ? intval($_POST['cid']) : 0);
 	$uid      = local_user();
-	$startyear = intval($_POST['startyear']);
-	$startmonth = intval($_POST['startmonth']);
-	$startday = intval($_POST['startday']);
-	$starthour = intval($_POST['starthour']);
-	$startminute = intval($_POST['startminute']);
 
-	$finishyear = intval($_POST['finishyear']);
-	$finishmonth = intval($_POST['finishmonth']);
-	$finishday = intval($_POST['finishday']);
-	$finishhour = intval($_POST['finishhour']);
-	$finishminute = intval($_POST['finishminute']);
+	$start_text = escape_tags($_REQUEST['start_text']);
+	$finish_text = escape_tags($_REQUEST['finish_text']);
 
 	$adjust   = intval($_POST['adjust']);
 	$nofinish = intval($_POST['nofinish']);
@@ -31,12 +49,23 @@ function events_post(&$a) {
 	// The default setting for the `private` field in event_store() is false, so mirror that
 	$private_event = false;
 
+	if($start_text) {
+		$start = $start_text;
+	}
+	else {
+		$start    = sprintf('%d-%d-%d %d:%d:0',$startyear,$startmonth,$startday,$starthour,$startminute);
+	}
 
-	$start    = sprintf('%d-%d-%d %d:%d:0',$startyear,$startmonth,$startday,$starthour,$startminute);
-	if($nofinish)
+	if($nofinish) {
 		$finish = '0000-00-00 00:00:00';
-	else
+	}
+
+	if($finish_text) {
+		$finish = $finish_text;
+	}
+	else {
 		$finish    = sprintf('%d-%d-%d %d:%d:0',$finishyear,$finishmonth,$finishday,$finishhour,$finishminute);
+	}
 
 	if($adjust) {
 		$start = datetime_convert(date_default_timezone_get(),'UTC',$start);
@@ -51,20 +80,33 @@ function events_post(&$a) {
 
 	// Don't allow the event to finish before it begins.
 	// It won't hurt anything, but somebody will file a bug report
-	// and we'll waste a bunch of time responding to it. Time that 
-	// could've been spent doing something else. 
-
-	if(strcmp($finish,$start) < 0)
-		$finish = $start;
+	// and we'll waste a bunch of time responding to it. Time that
+	// could've been spent doing something else.
 
 	$summary  = escape_tags(trim($_POST['summary']));
 	$desc     = escape_tags(trim($_POST['desc']));
 	$location = escape_tags(trim($_POST['location']));
 	$type     = 'event';
 
+	$action = ($event_id == '') ? 'new' : "event/" . $event_id;
+	$onerror_url = $a->get_baseurl() . "/events/" . $action . "?summary=$summary&description=$desc&location=$location&start=$start_text&finish=$finish_text&adjust=$adjust&nofinish=$nofinish";
+
+	if(strcmp($finish,$start) < 0 && !$nofinish) {
+		notice( t('Event can not end before it has started.') . EOL);
+		if(intval($_REQUEST['preview'])) {
+			echo( t('Event can not end before it has started.'));
+			killme();
+		}
+		goaway($onerror_url);
+	}
+
 	if((! $summary) || (! $start)) {
 		notice( t('Event title and start time are required.') . EOL);
-		goaway($a->get_baseurl() . '/events/new');
+		if(intval($_REQUEST['preview'])) {
+			echo( t('Event title and start time are required.'));
+			killme();
+		}
+		goaway($onerror_url);
 	}
 
 	$share = ((intval($_POST['share'])) ? intval($_POST['share']) : 0);
@@ -106,6 +148,7 @@ function events_post(&$a) {
 
 
 	$datarray = array();
+	$datarray['guid'] = get_guid(32);
 	$datarray['start'] = $start;
 	$datarray['finish'] = $finish;
 	$datarray['summary'] = $summary;
@@ -125,11 +168,18 @@ function events_post(&$a) {
 	$datarray['created'] = $created;
 	$datarray['edited'] = $edited;
 
+	if(intval($_REQUEST['preview'])) {
+		$html = format_event_html($datarray);
+		echo $html;
+			killme();
+	}
+
 	$item_id = event_store($datarray);
 
 	if(! $cid)
-		proc_run('php',"include/notifier.php","event","$item_id");
+		proc_run(PRIORITY_HIGH, "include/notifier.php", "event", $item_id);
 
+	goaway($_SESSION['return_url']);
 }
 
 
@@ -140,6 +190,9 @@ function events_content(&$a) {
 		notice( t('Permission denied.') . EOL);
 		return;
 	}
+
+	if($a->argc == 1)
+		$_SESSION['return_url'] = $a->get_baseurl() . '/' . $a->cmd;
 
 	if(($a->argc > 2) && ($a->argv[1] === 'ignore') && intval($a->argv[2])) {
 		$r = q("update event set ignore = 1 where id = %d and uid = %d",
@@ -155,14 +208,24 @@ function events_content(&$a) {
 		);
 	}
 
+	if ($a->theme_events_in_profile)
+		nav_set_selected('home');
+	else
+		nav_set_selected('events');
 
 	$editselect = 'none';
 	if( feature_enabled(local_user(), 'richtext') )
 		$editselect = 'textareas';
 
+	// get the translation strings for the callendar
+	$i18n = get_event_strings();
+
 	$htpl = get_markup_template('event_head.tpl');
 	$a->page['htmlhead'] .= replace_macros($htpl,array(
 		'$baseurl' => $a->get_baseurl(),
+		'$module_url' => '/events',
+		'$modparams' => 1,
+		'$i18n' => $i18n,
 		'$editselect' => $editselect
 	));
 
@@ -174,7 +237,8 @@ function events_content(&$a) {
 
 	$o ="";
 	// tabs
-	$tabs = profile_tabs($a, True);	
+	if ($a->theme_events_in_profile)
+		$tabs = profile_tabs($a, True);
 
 
 
@@ -199,18 +263,19 @@ function events_content(&$a) {
 		}
 	}
 
+	// The view mode part is similiar to /mod/cal.php
 	if($mode == 'view') {
-		
-		
-	    $thisyear = datetime_convert('UTC',date_default_timezone_get(),'now','Y');
-    	$thismonth = datetime_convert('UTC',date_default_timezone_get(),'now','m');
+
+
+		$thisyear = datetime_convert('UTC',date_default_timezone_get(),'now','Y');
+		$thismonth = datetime_convert('UTC',date_default_timezone_get(),'now','m');
 		if(! $y)
 			$y = intval($thisyear);
 		if(! $m)
 			$m = intval($thismonth);
 
 		// Put some limits on dates. The PHP date functions don't seem to do so well before 1900.
-		// An upper limit was chosen to keep search engines from exploring links millions of years in the future. 
+		// An upper limit was chosen to keep search engines from exploring links millions of years in the future.
 
 		if($y < 1901)
 			$y = 1900;
@@ -231,7 +296,7 @@ function events_content(&$a) {
 			$prevmonth = 12;
 			$prevyear --;
 		}
-			
+
 		$dim    = get_dim($y,$m);
 		$start  = sprintf('%d-%d-%d %d:%d:%d',$y,$m,1,0,0,0);
 		$finish = sprintf('%d-%d-%d %d:%d:%d',$y,$m,$dim,23,59,59);
@@ -241,36 +306,28 @@ function events_content(&$a) {
 			if (x($_GET,'start'))	$start = date("Y-m-d h:i:s", $_GET['start']);
 			if (x($_GET,'end'))	$finish = date("Y-m-d h:i:s", $_GET['end']);
 		}
-	
+
 		$start  = datetime_convert('UTC','UTC',$start);
 		$finish = datetime_convert('UTC','UTC',$finish);
 
 		$adjust_start = datetime_convert('UTC', date_default_timezone_get(), $start);
 		$adjust_finish = datetime_convert('UTC', date_default_timezone_get(), $finish);
 
+		// put the event parametes in an array so we can better transmit them
+		$event_params = array(
+			'event_id' => (x($_GET,'id') ? $_GET["id"] : 0),
+			'start' => $start,
+			'finish' => $finish,
+			'adjust_start' => $adjust_start,
+			'adjust_finish' => $adjust_finish,
+			'ignored' => $ignored,
+		);
 
+		// get events by id or by date
 		if (x($_GET,'id')){
-			$r = q("SELECT `event`.*, `item`.`id` AS `itemid`,`item`.`plink`,
-				`item`.`author-name`, `item`.`author-avatar`, `item`.`author-link` FROM `event` LEFT JOIN `item` ON `item`.`event-id` = `event`.`id` 
-				WHERE `event`.`uid` = %d AND `event`.`id` = %d",
-				intval(local_user()),
-				intval($_GET['id'])
-			);
+			$r = event_by_id(local_user(), $event_params);
 		} else {
-			$r = q("SELECT `event`.*, `item`.`id` AS `itemid`,`item`.`plink`,
-				`item`.`author-name`, `item`.`author-avatar`, `item`.`author-link` FROM `event` LEFT JOIN `item` ON `item`.`event-id` = `event`.`id` 
-				WHERE `event`.`uid` = %d and event.ignore = %d
-				AND (( `adjust` = 0 AND ( `finish` >= '%s' OR ( nofinish AND start >= '%s' ) ) AND `start` <= '%s' ) 
-				OR  (  `adjust` = 1 AND ( `finish` >= '%s' OR ( nofinish AND start >= '%s' ) ) AND `start` <= '%s' )) ",
-				intval(local_user()),
-				intval($ignored),
-				dbesc($start),
-				dbesc($start),
-				dbesc($finish),
-				dbesc($adjust_start),
-				dbesc($adjust_start),
-				dbesc($adjust_finish)
-			);
+			$r = events_by_date(local_user(), $event_params);
 		}
 
 		$links = array();
@@ -279,70 +336,22 @@ function events_content(&$a) {
 			$r = sort_by_date($r);
 			foreach($r as $rr) {
 				$j = (($rr['adjust']) ? datetime_convert('UTC',date_default_timezone_get(),$rr['start'], 'j') : datetime_convert('UTC','UTC',$rr['start'],'j'));
-				if(! x($links,$j)) 
+				if(! x($links,$j))
 					$links[$j] = $a->get_baseurl() . '/' . $a->cmd . '#link-' . $j;
 			}
 		}
 
-
 		$events=array();
 
-		$last_date = '';
-		$fmt = t('l, F j');
-
-		if(count($r)) {
+		// transform the event in a usable array
+		if(count($r))
 			$r = sort_by_date($r);
-			foreach($r as $rr) {
-				
-				
-				$j = (($rr['adjust']) ? datetime_convert('UTC',date_default_timezone_get(),$rr['start'], 'j') : datetime_convert('UTC','UTC',$rr['start'],'j'));
-				$d = (($rr['adjust']) ? datetime_convert('UTC',date_default_timezone_get(),$rr['start'], $fmt) : datetime_convert('UTC','UTC',$rr['start'],$fmt));
-				$d = day_translate($d);
-				
-				$start = (($rr['adjust']) ? datetime_convert('UTC',date_default_timezone_get(),$rr['start'], 'c') : datetime_convert('UTC','UTC',$rr['start'],'c'));
-				if ($rr['nofinish']){
-					$end = null;
-				} else {
-					$end = (($rr['adjust']) ? datetime_convert('UTC',date_default_timezone_get(),$rr['finish'], 'c') : datetime_convert('UTC','UTC',$rr['finish'],'c'));
-				}
-				
-				
-				$is_first = ($d !== $last_date);
-					
-				$last_date = $d;
-				$edit = ((! $rr['cid']) ? array($a->get_baseurl().'/events/event/'.$rr['id'],t('Edit event'),'','') : null);
-				$title = strip_tags(html_entity_decode(bbcode($rr['summary']),ENT_QUOTES,'UTF-8'));
-				if(! $title) {
-					list($title, $_trash) = explode("<br",bbcode($rr['desc']),2);
-					$title = strip_tags(html_entity_decode($title,ENT_QUOTES,'UTF-8'));
-				}
-				$html = format_event_html($rr);
-				$rr['desc'] = bbcode($rr['desc']);
-				$rr['location'] = bbcode($rr['location']);
-				$events[] = array(
-					'id'=>$rr['id'],
-					'start'=> $start,
-					'end' => $end,
-					'allDay' => false,
-					'title' => $title,
-					
-					'j' => $j,
-					'd' => $d,
-					'edit' => $edit,
-					'is_first'=>$is_first,
-					'item'=>$rr,
-					'html'=>$html,
-					'plink' => array($rr['plink'],t('link to source'),'',''),
-				);
+			$events = process_events($r);
 
-
-			}
-		}
-		 
 		if ($a->argv[1] === 'json'){
 			echo json_encode($events); killme();
 		}
-		
+
 		// links: array('href', 'text', 'extra css classes', 'title')
 		if (x($_GET,'id')){
 			$tpl =  get_markup_template("event.tpl");
@@ -368,12 +377,18 @@ function events_content(&$a) {
 			'$baseurl'	=> $a->get_baseurl(),
 			'$tabs'		=> $tabs,
 			'$title'	=> t('Events'),
+			'$view'		=> t('View'),
 			'$new_event'=> array($a->get_baseurl().'/events/new',t('Create New Event'),'',''),
 			'$previus'	=> array($a->get_baseurl()."/events/$prevyear/$prevmonth",t('Previous'),'',''),
 			'$next'		=> array($a->get_baseurl()."/events/$nextyear/$nextmonth",t('Next'),'',''),
 			'$calendar' => cal($y,$m,$links, ' eventcal'),
 
 			'$events'	=> $events,
+
+			"today" => t("today"),
+			"month" => t("month"),
+			"week" => t("week"),
+			"day" => t("day"),
 
 
 		));
@@ -393,6 +408,19 @@ function events_content(&$a) {
 			$orig_event = $r[0];
 	}
 
+	// Passed parameters overrides anything found in the DB
+	if($mode === 'edit' || $mode === 'new') {
+		if(!x($orig_event)) $orig_event = array();
+		// In case of an error the browser is redirected back here, with these parameters filled in with the previous values
+		if(x($_REQUEST,'nofinish')) $orig_event['nofinish'] = $_REQUEST['nofinish'];
+		if(x($_REQUEST,'adjust')) $orig_event['adjust'] = $_REQUEST['adjust'];
+		if(x($_REQUEST,'summary')) $orig_event['summary'] = $_REQUEST['summary'];
+		if(x($_REQUEST,'description')) $orig_event['description'] = $_REQUEST['description'];
+		if(x($_REQUEST,'location')) $orig_event['location'] = $_REQUEST['location'];
+		if(x($_REQUEST,'start')) $orig_event['start'] = $_REQUEST['start'];
+		if(x($_REQUEST,'finish')) $orig_event['finish'] = $_REQUEST['finish'];
+	}
+
 	if($mode === 'edit' || $mode === 'new') {
 
 		$n_checked = ((x($orig_event) && $orig_event['nofinish']) ? ' checked="checked" ' : '');
@@ -410,12 +438,9 @@ function events_content(&$a) {
 		else
 			$sh_checked = (($orig_event['allow_cid'] === '<' . local_user() . '>' && (! $orig_event['allow_gid']) && (! $orig_event['deny_cid']) && (! $orig_event['deny_gid'])) ? '' : ' checked="checked" ' );
 
-		if($cid)
+		if($cid OR ($mode !== 'new'))
 			$sh_checked .= ' disabled="disabled" ';
 
-
-
-		$tpl = get_markup_template('event_form.tpl');
 
 		$sdt = ((x($orig_event)) ? $orig_event['start'] : 'now');
 		$fdt = ((x($orig_event)) ? $orig_event['finish'] : 'now');
@@ -442,40 +467,47 @@ function events_content(&$a) {
 		if(! $f)
 			$f = 'ymd';
 
-		$dateformat = datesel_format($f);
-		$timeformat = t('hour:minute');
-
 		require_once('include/acl_selectors.php');
+
+		if ($mode === 'new')
+			$acl = (($cid) ? '' : populate_acl(((x($orig_event)) ? $orig_event : $a->user)));
+
+		$tpl = get_markup_template('event_form.tpl');
 
 		$o .= replace_macros($tpl,array(
 			'$post' => $a->get_baseurl() . '/events',
-			'$eid' => $eid, 
+			'$eid' => $eid,
 			'$cid' => $cid,
 			'$uri' => $uri,
-	
+
 			'$title' => t('Event details'),
-			'$desc' => sprintf( t('Format is %s %s. Starting date and Title are required.'),$dateformat,$timeformat),
-			
+			'$desc' => t('Starting date and Title are required.'),
 			'$s_text' => t('Event Starts:') . ' <span class="required" title="' . t('Required') . '">*</span>',
-			'$s_dsel' => datesel($f,'start',$syear+5,$syear,false,$syear,$smonth,$sday),
-			'$s_tsel' => timesel('start',$shour,$sminute),
+			'$s_dsel' => datetimesel($f,new DateTime(),DateTime::createFromFormat('Y',$syear+5),DateTime::createFromFormat('Y-m-d H:i',"$syear-$smonth-$sday $shour:$sminute"),t('Event Starts:'),'start_text',true,true,'','',true),
 			'$n_text' => t('Finish date/time is not known or not relevant'),
 			'$n_checked' => $n_checked,
 			'$f_text' => t('Event Finishes:'),
-			'$f_dsel' => datesel($f,'finish',$fyear+5,$fyear,false,$fyear,$fmonth,$fday),
-			'$f_tsel' => timesel('finish',$fhour,$fminute),
+			'$f_dsel' => datetimesel($f,new DateTime(),DateTime::createFromFormat('Y',$fyear+5),DateTime::createFromFormat('Y-m-d H:i',"$fyear-$fmonth-$fday $fhour:$fminute"),t('Event Finishes:'),'finish_text',true,true,'start_text'),
 			'$a_text' => t('Adjust for viewer timezone'),
 			'$a_checked' => $a_checked,
-			'$d_text' => t('Description:'), 
+			'$d_text' => t('Description:'),
 			'$d_orig' => $d_orig,
 			'$l_text' => t('Location:'),
 			'$l_orig' => $l_orig,
 			'$t_text' => t('Title:') . ' <span class="required" title="' . t('Required') . '">*</span>',
 			'$t_orig' => $t_orig,
+			'$summary' => array('summary', t('Title:'), $t_orig, '', '*'),
 			'$sh_text' => t('Share this event'),
+			'$share' => array('share', t('Share this event'), $sh_checked, ''),
 			'$sh_checked' => $sh_checked,
-			'$acl' => (($cid) ? '' : populate_acl(((x($orig_event)) ? $orig_event : $a->user),false)),
-			'$submit' => t('Submit')
+			'$nofinish' => array('nofinish', t('Finish date/time is not known or not relevant'), $n_checked),
+			'$adjust' => array('adjust', t('Adjust for viewer timezone'), $a_checked),
+			'$preview' => t('Preview'),
+			'$acl' => $acl,
+			'$submit' => t('Submit'),
+			'$basic' => t("Basic"),
+			'$advanced' => t("Advanced"),
+			'$permissions' => t('Permissions'),
 
 		));
 

@@ -285,7 +285,7 @@
 			if(livetime) {
 				clearTimeout(livetime);
 			}
-			livetime = setTimeout(liveUpdate, 10000);
+			livetime = setTimeout(liveUpdate, 5000);
 			return;
 		}
 		if(livetime != null)
@@ -402,7 +402,7 @@
 				$('body').css('cursor', 'auto');
 			}
 			/* autocomplete @nicknames */
-			$(".comment-edit-form  textarea").contact_autocomplete(baseurl+"/acl");
+			$(".comment-edit-form  textarea").editor_autocomplete(baseurl+"/acl");
 		
 			collapseHeight();
 

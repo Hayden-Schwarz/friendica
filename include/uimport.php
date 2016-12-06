@@ -156,7 +156,9 @@ function import_account(&$a, $file) {
 	$newuid = last_insert_id();
 	//~ $newuid = 1;
 
-
+	// Generate a new guid for the account. Otherwise there will be problems with diaspora
+	q("UPDATE `user` SET `guid` = '%s' WHERE `uid` = %d",
+		dbesc(generate_user_guid()), intval($newuid));
 
 	foreach ($account['profile'] as &$profile) {
 		foreach ($profile as $k => &$v) {
@@ -193,10 +195,10 @@ function import_account(&$a, $file) {
 					//  send relocate message (below)
 					break;
 				case NETWORK_ZOT:
-					// TODO handle zot network
+					/// @TODO handle zot network
 					break;
 				case NETWORK_MAIL2:
-					// TODO ?
+					/// @TODO ?
 					break;
 				case NETWORK_FEED:
 				case NETWORK_MAIL:
@@ -285,7 +287,7 @@ function import_account(&$a, $file) {
 	}
 
 	// send relocate messages
-	proc_run('php', 'include/notifier.php', 'relocate', $newuid);
+	proc_run(PRIORITY_HIGH, 'include/notifier.php', 'relocate', $newuid);
 
 	info(t("Done. You can now login with your username and password"));
 	goaway($a->get_baseurl() . "/login");

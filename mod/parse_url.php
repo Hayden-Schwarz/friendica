@@ -1,16 +1,20 @@
 <?php
-/* To-Do
-https://developers.google.com/+/plugins/snippet/
-
-<meta itemprop="name" content="Toller Titel">
-<meta itemprop="description" content="Eine tolle Beschreibung">
-<meta itemprop="image" content="http://maple.libertreeproject.org/images/tree-icon.png">
-
-<body itemscope itemtype="http://schema.org/Product">
-  <h1 itemprop="name">Shiny Trinket</h1>
-  <img itemprop="image" src="{image-url}" />
-  <p itemprop="description">Shiny trinkets are shiny.</p>
-</body>
+/** 
+ * @file mod/parse_url.php
+ * 
+ * @todo https://developers.google.com/+/plugins/snippet/
+ * 
+ * @verbatim
+ * <meta itemprop="name" content="Toller Titel">
+ * <meta itemprop="description" content="Eine tolle Beschreibung">
+ * <meta itemprop="image" content="http://maple.libertreeproject.org/images/tree-icon.png">
+ * 
+ * <body itemscope itemtype="http://schema.org/Product">
+ *   <h1 itemprop="name">Shiny Trinket</h1>
+ *   <img itemprop="image" src="{image-url}" />
+ *   <p itemprop="description">Shiny trinkets are shiny.</p>
+ * </body>
+ * @endverbatim
 */
 
 if(!function_exists('deletenode')) {
@@ -24,34 +28,62 @@ if(!function_exists('deletenode')) {
 }
 
 function completeurl($url, $scheme) {
-        $urlarr = parse_url($url);
+	$urlarr = parse_url($url);
 
-        if (isset($urlarr["scheme"]))
-                return($url);
+	if (isset($urlarr["scheme"]))
+		return($url);
 
-        $schemearr = parse_url($scheme);
+	$schemearr = parse_url($scheme);
 
-        $complete = $schemearr["scheme"]."://".$schemearr["host"];
+	$complete = $schemearr["scheme"]."://".$schemearr["host"];
 
-        if (@$schemearr["port"] != "")
-                $complete .= ":".$schemearr["port"];
+	if (@$schemearr["port"] != "")
+		$complete .= ":".$schemearr["port"];
 
 		if(strpos($urlarr['path'],'/') !== 0)
 			$complete .= '/';
 
-        $complete .= $urlarr["path"];
+	$complete .= $urlarr["path"];
 
-        if (@$urlarr["query"] != "")
-                $complete .= "?".$urlarr["query"];
+	if (@$urlarr["query"] != "")
+		$complete .= "?".$urlarr["query"];
 
-        if (@$urlarr["fragment"] != "")
-                $complete .= "#".$urlarr["fragment"];
+	if (@$urlarr["fragment"] != "")
+		$complete .= "#".$urlarr["fragment"];
 
-        return($complete);
+	return($complete);
+}
+
+function parseurl_getsiteinfo_cached($url, $no_guessing = false, $do_oembed = true) {
+
+	if ($url == "")
+		return false;
+
+	$r = q("SELECT * FROM `parsed_url` WHERE `url` = '%s' AND `guessing` = %d AND `oembed` = %d",
+		dbesc(normalise_link($url)), intval(!$no_guessing), intval($do_oembed));
+
+	if ($r)
+		$data = $r[0]["content"];
+
+	if (!is_null($data)) {
+		$data = unserialize($data);
+		return $data;
+	}
+
+	$data = parseurl_getsiteinfo($url, $no_guessing, $do_oembed);
+
+	q("INSERT INTO `parsed_url` (`url`, `guessing`, `oembed`, `content`, `created`) VALUES ('%s', %d, %d, '%s', '%s')
+		 ON DUPLICATE KEY UPDATE `content` = '%s', `created` = '%s'",
+		dbesc(normalise_link($url)), intval(!$no_guessing), intval($do_oembed),
+		dbesc(serialize($data)), dbesc(datetime_convert()),
+		dbesc(serialize($data)), dbesc(datetime_convert()));
+
+	return $data;
 }
 
 function parseurl_getsiteinfo($url, $no_guessing = false, $do_oembed = true, $count = 1) {
 	require_once("include/network.php");
+	require_once("include/Photo.php");
 
 	$a = get_app();
 
@@ -70,10 +102,12 @@ function parseurl_getsiteinfo($url, $no_guessing = false, $do_oembed = true, $co
 	$siteinfo["url"] = $url;
 	$siteinfo["type"] = "link";
 
+	$stamp1 = microtime(true);
+
 	$ch = curl_init();
 	curl_setopt($ch, CURLOPT_URL, $url);
 	curl_setopt($ch, CURLOPT_HEADER, 1);
-	curl_setopt($ch, CURLOPT_NOBODY, 0);
+	curl_setopt($ch, CURLOPT_NOBODY, 1);
 	curl_setopt($ch, CURLOPT_TIMEOUT, 3);
 	curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 	//curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 1);
@@ -81,8 +115,10 @@ function parseurl_getsiteinfo($url, $no_guessing = false, $do_oembed = true, $co
 
 	$header = curl_exec($ch);
 	$curl_info = @curl_getinfo($ch);
-        $http_code = $curl_info['http_code'];
+	$http_code = $curl_info['http_code'];
 	curl_close($ch);
+
+	$a->save_timestamp($stamp1, "network");
 
 	if ((($curl_info['http_code'] == "301") OR ($curl_info['http_code'] == "302") OR ($curl_info['http_code'] == "303") OR ($curl_info['http_code'] == "307"))
 		AND (($curl_info['redirect_url'] != "") OR ($curl_info['location'] != ""))) {
@@ -93,6 +129,14 @@ function parseurl_getsiteinfo($url, $no_guessing = false, $do_oembed = true, $co
 		return($siteinfo);
 	}
 
+	// if the file is too large then exit
+	if ($curl_info["download_content_length"] > 1000000)
+		return($siteinfo);
+
+	// if it isn't a HTML file then exit
+	if (($curl_info["content_type"] != "") AND !strstr(strtolower($curl_info["content_type"]),"html"))
+		return($siteinfo);
+
 	if ($do_oembed) {
 		require_once("include/oembed.php");
 
@@ -100,7 +144,34 @@ function parseurl_getsiteinfo($url, $no_guessing = false, $do_oembed = true, $co
 
 		if ($oembed_data->type != "error")
 			$siteinfo["type"] = $oembed_data->type;
+
+		if (($oembed_data->type == "link") AND ($siteinfo["type"] != "photo")) {
+			if (isset($oembed_data->title))
+				$siteinfo["title"] = $oembed_data->title;
+			if (isset($oembed_data->description))
+				$siteinfo["text"] = trim($oembed_data->description);
+			if (isset($oembed_data->thumbnail_url))
+				$siteinfo["image"] = $oembed_data->thumbnail_url;
+		}
 	}
+
+	$stamp1 = microtime(true);
+
+	// Now fetch the body as well
+	$ch = curl_init();
+	curl_setopt($ch, CURLOPT_URL, $url);
+	curl_setopt($ch, CURLOPT_HEADER, 1);
+	curl_setopt($ch, CURLOPT_NOBODY, 0);
+	curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+	curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+	curl_setopt($ch, CURLOPT_USERAGENT, $a->get_useragent());
+
+	$header = curl_exec($ch);
+	$curl_info = @curl_getinfo($ch);
+	$http_code = $curl_info['http_code'];
+	curl_close($ch);
+
+	$a->save_timestamp($stamp1, "network");
 
 	// Fetch the first mentioned charset. Can be in body or header
 	$charset = "";
@@ -143,39 +214,38 @@ function parseurl_getsiteinfo($url, $no_guessing = false, $do_oembed = true, $co
 	$xpath = new DomXPath($doc);
 
 	$list = $xpath->query("//meta[@content]");
-        foreach ($list as $node) {
-                $attr = array();
-                if ($node->attributes->length)
-                        foreach ($node->attributes as $attribute)
-                                $attr[$attribute->name] = $attribute->value;
+	foreach ($list as $node) {
+		$attr = array();
+		if ($node->attributes->length)
+			foreach ($node->attributes as $attribute)
+				$attr[$attribute->name] = $attribute->value;
 
-                if (@$attr["http-equiv"] == 'refresh') {
-                        $path = $attr["content"];
-                        $pathinfo = explode(";", $path);
-                        $content = "";
-                        foreach ($pathinfo AS $value) {
-                                if (substr(strtolower($value), 0, 4) == "url=")
-                                        $content = substr($value, 4);
-                        }
-                        if ($content != "") {
-                                $siteinfo = parseurl_getsiteinfo($content, $no_guessing, $do_oembed, ++$count);
-                                return($siteinfo);
-                        }
-                }
+		if (@$attr["http-equiv"] == 'refresh') {
+			$path = $attr["content"];
+			$pathinfo = explode(";", $path);
+			$content = "";
+			foreach ($pathinfo AS $value) {
+				if (substr(strtolower($value), 0, 4) == "url=")
+					$content = substr($value, 4);
+			}
+			if ($content != "") {
+				$siteinfo = parseurl_getsiteinfo($content, $no_guessing, $do_oembed, ++$count);
+				return($siteinfo);
+			}
+		}
 	}
 
-	//$list = $xpath->query("head/title");
 	$list = $xpath->query("//title");
-	foreach ($list as $node)
-		$siteinfo["title"] =  html_entity_decode($node->nodeValue, ENT_QUOTES, "UTF-8");
+	if ($list->length > 0)
+		$siteinfo["title"] = $list->item(0)->nodeValue;
 
 	//$list = $xpath->query("head/meta[@name]");
 	$list = $xpath->query("//meta[@name]");
 	foreach ($list as $node) {
 		$attr = array();
 		if ($node->attributes->length)
-                        foreach ($node->attributes as $attribute)
-                                $attr[$attribute->name] = $attribute->value;
+			foreach ($node->attributes as $attribute)
+				$attr[$attribute->name] = $attribute->value;
 
 		$attr["content"] = trim(html_entity_decode($attr["content"], ENT_QUOTES, "UTF-8"));
 
@@ -226,7 +296,8 @@ function parseurl_getsiteinfo($url, $no_guessing = false, $do_oembed = true, $co
 	if (isset($keywords)) {
 		$siteinfo["keywords"] = array();
 		foreach ($keywords as $keyword)
-			$siteinfo["keywords"][] = trim($keyword);
+			if (!in_array(trim($keyword), $siteinfo["keywords"]))
+				$siteinfo["keywords"][] = trim($keyword);
 	}
 
 	//$list = $xpath->query("head/meta[@property]");
@@ -234,8 +305,8 @@ function parseurl_getsiteinfo($url, $no_guessing = false, $do_oembed = true, $co
 	foreach ($list as $node) {
 		$attr = array();
 		if ($node->attributes->length)
-                        foreach ($node->attributes as $attribute)
-                                $attr[$attribute->name] = $attribute->value;
+			foreach ($node->attributes as $attribute)
+				$attr[$attribute->name] = $attribute->value;
 
 		$attr["content"] = trim(html_entity_decode($attr["content"], ENT_QUOTES, "UTF-8"));
 
@@ -253,25 +324,16 @@ function parseurl_getsiteinfo($url, $no_guessing = false, $do_oembed = true, $co
 			}
 	}
 
-	if (isset($oembed_data) AND ($oembed_data->type == "link") AND ($siteinfo["type"] != "photo")) {
-		if (isset($oembed_data->title) AND (trim($oembed_data->title) != ""))
-			$siteinfo["title"] = $oembed_data->title;
-		if (isset($oembed_data->description) AND (trim($oembed_data->description) != ""))
-			$siteinfo["text"] = trim($oembed_data->description);
-		if (isset($oembed_data->thumbnail_url) AND (trim($oembed_data->thumbnail_url) != ""))
-			$siteinfo["image"] = $oembed_data->thumbnail_url;
-	}
-
 	if ((@$siteinfo["image"] == "") AND !$no_guessing) {
-            $list = $xpath->query("//img[@src]");
-            foreach ($list as $node) {
-                $attr = array();
-                if ($node->attributes->length)
-                    foreach ($node->attributes as $attribute)
-                        $attr[$attribute->name] = $attribute->value;
+	    $list = $xpath->query("//img[@src]");
+	    foreach ($list as $node) {
+		$attr = array();
+		if ($node->attributes->length)
+		    foreach ($node->attributes as $attribute)
+			$attr[$attribute->name] = $attribute->value;
 
 			$src = completeurl($attr["src"], $url);
-			$photodata = @getimagesize($src);
+			$photodata = get_photo_info($src);
 
 			if (($photodata) && ($photodata[0] > 150) and ($photodata[1] > 150)) {
 				if ($photodata[0] > 300) {
@@ -287,13 +349,13 @@ function parseurl_getsiteinfo($url, $no_guessing = false, $do_oembed = true, $co
 								"height"=>$photodata[1]);
 			}
 
- 		}
-    } else {
+		}
+    } elseif ($siteinfo["image"] != "") {
 		$src = completeurl($siteinfo["image"], $url);
 
 		unset($siteinfo["image"]);
 
-		$photodata = @getimagesize($src);
+		$photodata = get_photo_info($src);
 
 		if (($photodata) && ($photodata[0] > 10) and ($photodata[1] > 10))
 			$siteinfo["images"][] = array("src"=>$src,
@@ -347,6 +409,8 @@ function arr_add_hashes(&$item,$k) {
 
 function parse_url_content(&$a) {
 
+	require_once("include/items.php");
+
 	$text = null;
 	$str_tags = '';
 
@@ -375,6 +439,15 @@ function parse_url_content(&$a) {
 			array_walk($arr_tags,'arr_add_hashes');
 			$str_tags = $br . implode(' ',$arr_tags) . $br;
 		}
+	}
+
+	// add url scheme if missing
+	$arrurl = parse_url($url);
+	if (!x($arrurl, 'scheme')) {
+		if (x($arrurl, 'host'))
+			$url = "http:".$url;
+		else
+			$url = "http://".$url;
 	}
 
 	logger('parse_url: ' . $url);
@@ -415,80 +488,15 @@ function parse_url_content(&$a) {
 
 	$siteinfo = parseurl_getsiteinfo($url);
 
-//	if ($textmode) {
-//		require_once("include/items.php");
-//
-//		echo add_page_info_data($siteinfo);
-//		killme();
-//	}
+	unset($siteinfo["keywords"]);
 
-	$url= $siteinfo["url"];
+	$info = add_page_info_data($siteinfo);
 
-	// If the link contains BBCode stuff, make a short link out of this to avoid parsing problems
-	if (strpos($url, '[') OR strpos($url, ']')) {
-		require_once("include/network.php");
-		$url = short_link($url);
-	}
+	if (!$textmode)
+		// Replace ' with ’ - not perfect - but the richtext editor has problems otherwise
+		$info = str_replace(array("&#039;"), array("&#8217;"), $info);
 
-	$sitedata = "";
-
-	if($siteinfo["title"] == "") {
-		$sitedata .= sprintf($template,$url,$url,'') . $str_tags;
-		killme();
-	} else {
-		$text = $siteinfo["text"];
-		$title = $siteinfo["title"];
-	}
-
-	$image = "";
-
-	if (($siteinfo["type"] != "video") AND (sizeof($siteinfo["images"]) > 0)){
-		/* Execute below code only if image is present in siteinfo */
-
-		$total_images = 0;
-		$max_images = get_config('system','max_bookmark_images');
-		if($max_images === false)
-			$max_images = 2;
-		else
-			$max_images = intval($max_images);
-
-		foreach ($siteinfo["images"] as $imagedata) {
-			if($textmode)
-				$image .= '[img='.$imagedata["width"].'x'.$imagedata["height"].']'.$imagedata["src"].'[/img]' . "\n";
-			else
-				$image .= '<img height="'.$imagedata["height"].'" width="'.$imagedata["width"].'" src="'.$imagedata["src"].'" alt="photo" /><br />';
-			$total_images ++;
-			if($max_images && $max_images >= $total_images)
-				break;
-		}
-	}
-
-	if(strlen($text)) {
-		if($textmode)
-			$text = '[quote]'.trim($text).'[/quote]';
-		else
-			$text = '<blockquote>'.htmlspecialchars(trim($text)).'</blockquote>';
-	}
-
-	if($image)
-		$text = $br.$br.$image.$text;
-	else
-		$text = $br.$text;
-
-	$title = str_replace(array("\r","\n"),array('',''),$title);
-
-	$result = sprintf($template,$url,($title) ? $title : $url,$text) . $str_tags;
-
-	logger('parse_url: returns: ' . $result);
-
-	$sitedata .=  trim($result);
-
-	if (($siteinfo["type"] == "video") AND ($url != ""))
-		echo "[class=type-video]".$sitedata."[/class]";
-	elseif (($siteinfo["type"] != "photo"))
-		echo "[class=type-link]".$sitedata."[/class]";
-	else
-		echo "[class=type-photo]".$title.$br.$image."[/class]";
+	echo $info;
 
 	killme();
 }
